@@ -139,14 +139,31 @@
 
 .export-buttons-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-2);
 }
 
-@media (max-width: 900px) {
-  .export-buttons-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
+.export-buttons-grid .acorn-button {
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+  text-align: center;
+  line-height: 1.25;
+  padding: var(--space-15) var(--space-2);
+  font-size: var(--font-size-xs);
+  height: auto;
+  min-height: 34px;
+}
+
+.export-buttons-grid .acorn-button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-buttons-grid .acorn-button .acorn-icon {
+  flex-shrink: 0;
 }
 
 .code-preview-section {

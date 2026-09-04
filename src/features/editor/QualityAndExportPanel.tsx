@@ -232,34 +232,65 @@ export const QualityAndExportPanel: React.FC = () => {
         <div className="export-actions-section">
           <span className="export-section-title">Export Formats</span>
           <div className="export-buttons-grid">
-            <Button variant="secondary" size="sm" onClick={exportReadableJson}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={exportReadableJson}
+              title={`Download readable JSON recipe (${formatBytes(sizeReport.readableJsonBytes)})`}
+            >
               <AcornIcon name="download" size={14} />
-              JSON Recipe ({formatBytes(sizeReport.readableJsonBytes)})
+              <span>JSON Recipe</span>
             </Button>
 
-            <Button variant="secondary" size="sm" onClick={exportMinifiedJson}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={exportMinifiedJson}
+              title={`Download minified JSON recipe (${formatBytes(sizeReport.minifiedJsonBytes)})`}
+            >
               <AcornIcon name="download" size={14} />
-              Minified JSON ({formatBytes(sizeReport.minifiedJsonBytes)})
+              <span>Minified JSON</span>
             </Button>
 
-            <Button variant="secondary" size="sm" onClick={exportJs}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={exportJs}
+              title="Download standalone zero-dependency JavaScript module"
+            >
               <AcornIcon name="download" size={14} />
-              Standalone JS Module
+              <span>Standalone JS</span>
             </Button>
 
-            <Button variant="secondary" size="sm" onClick={exportTs}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={exportTs}
+              title="Download standalone zero-dependency TypeScript module"
+            >
               <AcornIcon name="download" size={14} />
-              Standalone TypeScript
+              <span>Standalone TS</span>
             </Button>
 
-            <Button variant="secondary" size="sm" onClick={exportWav} disabled={isExportingWav}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={exportWav}
+              disabled={isExportingWav}
+              title="Export synthesized procedural sound as 44.1kHz WAV"
+            >
               <AcornIcon name="download" size={14} />
-              {isExportingWav ? 'Rendering WAV...' : 'Rendered WAV Audio'}
+              <span>{isExportingWav ? 'Rendering WAV...' : 'WAV Audio'}</span>
             </Button>
 
-            <Button variant="primary" size="sm" onClick={exportRuntimeFiles}>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={exportRuntimeFiles}
+              title="Download runtime package bundle with audio engine, recipe, and player"
+            >
               <AcornIcon name="download" size={14} />
-              Runtime Package (All Files)
+              <span>Runtime Package</span>
             </Button>
           </div>
         </div>

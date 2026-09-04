@@ -132,7 +132,7 @@ export const OriginalAudioPanel: React.FC = () => {
         <div className="original-audio-panel__content">
           {/* Metadata Bar */}
           <div className="original-audio-panel__meta-grid">
-            <div className="meta-item">
+            <div className="meta-item meta-item--file">
               <span className="meta-label">File:</span>
               <span className="meta-val filename" title={originalFileName || ''}>
                 {originalFileName}
@@ -140,17 +140,26 @@ export const OriginalAudioPanel: React.FC = () => {
             </div>
             <div className="meta-item">
               <span className="meta-label">Duration:</span>
-              <span className="meta-val">{originalBuffer.duration.toFixed(3)}s</span>
+              <span className="meta-val" title={`${originalBuffer.duration.toFixed(4)} seconds`}>
+                {originalBuffer.duration.toFixed(3)}s
+              </span>
             </div>
             <div className="meta-item">
               <span className="meta-label">Size:</span>
-              <span className="meta-val">{formatBytes(originalSizeBytes)}</span>
+              <span className="meta-val" title={`${originalSizeBytes} bytes`}>
+                {formatBytes(originalSizeBytes)}
+              </span>
             </div>
-            <div className="meta-item">
+            <div className="meta-item meta-item--rate">
               <span className="meta-label">Rate / Ch:</span>
-              <span className="meta-val">
-                {originalBuffer.sampleRate} Hz ·{' '}
-                {originalBuffer.numberOfChannels === 1 ? 'Mono' : 'Stereo'}
+              <span
+                className="meta-val"
+                title={`${originalBuffer.sampleRate} Hz · ${originalBuffer.numberOfChannels === 1 ? 'Mono' : 'Stereo'}`}
+              >
+                {originalBuffer.sampleRate >= 1000
+                  ? `${(originalBuffer.sampleRate / 1000).toFixed(1)} kHz`
+                  : `${originalBuffer.sampleRate} Hz`}{' '}
+                · {originalBuffer.numberOfChannels === 1 ? 'Mono' : 'Stereo'}
               </span>
             </div>
           </div>

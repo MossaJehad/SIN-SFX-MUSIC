@@ -104,12 +104,13 @@
 
 .original-audio-panel__meta-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-15) var(--space-3);
   background-color: var(--color-canvas-subtle);
   padding: var(--space-2);
   border-radius: var(--border-radius-small);
   border: 1px solid var(--color-border-subtle);
+  min-width: 0;
 }
 
 .meta-item {
@@ -117,17 +118,34 @@
   align-items: baseline;
   gap: var(--space-1);
   font-size: var(--font-size-xs);
+  min-width: 0;
+}
+
+.meta-item--file {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.meta-item--rate {
+  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .meta-label {
   color: var(--color-text-muted);
   font-weight: 500;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .meta-val {
   font-family: var(--font-family-mono);
   color: var(--color-text);
   font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .meta-val.filename {
@@ -180,7 +198,7 @@
 
 .analysis-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-1);
 }
 
@@ -191,6 +209,7 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+  min-width: 0;
 }
 
 .metric-label {

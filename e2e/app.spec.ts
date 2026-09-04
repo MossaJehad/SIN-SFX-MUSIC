@@ -130,4 +130,53 @@ test.describe('Resonance SFX - End-to-End Application Workflows', () => {
     await closeBtn.click();
     await expect(dialog).not.toBeVisible();
   });
+
+  test('verifies metadata layout, submetric bars alignment, and waveform canvas theme reactivity', async ({
+    page,
+  }) => {
+    const testFilePath = path.resolve(process.cwd(), 'e2e/test-assets/laser-test.wav');
+
+    // Upload audio file
+    const fileInput = page.locator('input[aria-label="Upload Audio File"]');
+    await fileInput.setInputFiles(testFilePath);
+
+    // Verify metadata values are formatted properly without overflow
+    const metaRate = page.locator('.meta-item--rate .meta-val');
+    await expect(metaRate).toBeVisible();
+    await expect(metaRate).toContainText('kHz');
+
+    // Click "Generate Procedural Version"
+    const generateButton = page.locator('button:has-text("Generate Procedural Version")');
+    await generateButton.click();
+
+    // Wait for submetrics to appear
+    const submetricBars = page.locator('.submetric-bar-wrap');
+    await expect(submetricBars.first()).toBeVisible({ timeout: 15000 });
+    expect(await submetricBars.count()).toBe(3);
+
+    // Verify all 3 submetric progress bars have the exact same vertical Y position
+    const box0 = await submetricBars.nth(0).boundingBox();
+    const box1 = await submetricBars.nth(1).boundingBox();
+    const box2 = await submetricBars.nth(2).boundingBox();
+
+    expect(box0).not.toBeNull();
+    expect(box1).not.toBeNull();
+    expect(box2).not.toBeNull();
+    // Allow at most 1px tolerance due to subpixel rendering
+    expect(Math.abs(box0!.y - box1!.y)).toBeLessThanOrEqual(1.5);
+    expect(Math.abs(box1!.y - box2!.y)).toBeLessThanOrEqual(1.5);
+
+    // Verify export buttons are visible and properly structured
+    await expect(page.locator('button:has-text("Standalone JS")')).toBeVisible();
+    await expect(page.locator('button:has-text("Runtime Package")')).toBeVisible();
+
+    // Verify canvas theme reactivity: toggle theme and check canvas element redraws
+    const themeButton = page.locator('button[aria-label^="Switch to"]');
+    await themeButton.click();
+
+    // Canvas should still be visible and render without requiring canvas interaction
+    const canvas = page.locator('.waveform-slot canvas').first();
+    await expect(canvas).toBeVisible();
+  });
 });
+

@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useCallback, useMemo } from 'react';
+import { useAudioStore } from '@/features/editor/useAudioStore';
 import './WaveformCanvas.css';
 
 export interface WaveformCanvasProps {
@@ -19,6 +20,28 @@ interface MinMaxPeak {
   max: number;
 }
 
+function resolveCanvasColor(
+  canvas: HTMLCanvasElement | null,
+  colorProp: string | undefined,
+  cssVarFallback: string,
+  hexFallback: string
+): string {
+  if (!canvas) return hexFallback;
+  const computed = getComputedStyle(canvas);
+  if (colorProp && colorProp.trim().length > 0) {
+    const trimmed = colorProp.trim();
+    if (trimmed.startsWith('var(')) {
+      const varName = trimmed.replace(/^var\(\s*/, '').replace(/\s*[,)].*$/, '');
+      const val = computed.getPropertyValue(varName).trim();
+      if (val) return val;
+    } else {
+      return trimmed;
+    }
+  }
+  const val = computed.getPropertyValue(cssVarFallback).trim();
+  return val || hexFallback;
+}
+
 export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
   audioBuffer,
   currentTime = 0,
@@ -33,6 +56,7 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const theme = useAudioStore((state) => state.theme);
 
   const duration = explicitDuration ?? audioBuffer?.duration ?? 1;
 
@@ -83,19 +107,39 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
     const width = rect.width;
     const h = rect.height;
 
+    if (width === 0 || h === 0) return;
+
     canvas.width = Math.floor(width * dpr);
     canvas.height = Math.floor(h * dpr);
     ctx.scale(dpr, dpr);
 
-    // Read colors from CSS custom properties if not explicitly provided
-    const computedStyle = getComputedStyle(canvas);
-    const waveColor =
-      color || computedStyle.getPropertyValue('--color-waveform-original').trim() || '#0060df';
-    const activeCursorColor =
-      cursorColor || computedStyle.getPropertyValue('--color-waveform-cursor').trim() || '#c50042';
-    const bgColor = computedStyle.getPropertyValue('--color-waveform-bg').trim() || 'transparent';
-    const centerLineColor =
-      computedStyle.getPropertyValue('--color-border-subtle').trim() || '#d6d5da';
+    const isDark = theme === 'dark' || document.documentElement.getAttribute('data-theme') === 'dark';
+
+    // Resolve colors dynamically from computed styles and current theme
+    const waveColor = resolveCanvasColor(
+      canvas,
+      color,
+      '--color-waveform-original',
+      isDark ? '#7bb2ff' : '#0060df'
+    );
+    const activeCursorColor = resolveCanvasColor(
+      canvas,
+      cursorColor,
+      '--color-waveform-cursor',
+      isDark ? '#ff848b' : '#c50042'
+    );
+    const bgColor = resolveCanvasColor(
+      canvas,
+      undefined,
+      '--color-waveform-bg',
+      isDark ? '#23222b' : '#f7f6fb'
+    );
+    const centerLineColor = resolveCanvasColor(
+      canvas,
+      undefined,
+      '--color-border-subtle',
+      isDark ? '#383441' : '#e3e2e7'
+    );
 
     // Clear background
     ctx.fillStyle = bgColor;
@@ -112,7 +156,13 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
 
     if (peaks.length === 0) {
       // Empty waveform placeholder
-      ctx.fillStyle = computedStyle.getPropertyValue('--color-text-muted').trim() || '#73737c';
+      const placeholderColor = resolveCanvasColor(
+        canvas,
+        undefined,
+        '--color-text-muted',
+        isDark ? '#8f8f9d' : '#73737c'
+      );
+      ctx.fillStyle = placeholderColor;
       ctx.font = '11px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -157,16 +207,37 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
       ctx.closePath();
       ctx.fill();
     }
-  }, [peaks, currentTime, duration, color, cursorColor, zoom]);
+  }, [peaks, currentTime, duration, color, cursorColor, zoom, theme]);
 
+  // Redraw when draw dependencies (including theme) change
   useEffect(() => {
     draw();
   }, [draw]);
 
+  // Watch for window resize and DOM theme changes
   useEffect(() => {
     const handleResize = () => draw();
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+
+    const observer = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.type === 'attributes' && m.attributeName === 'data-theme') {
+          draw();
+        }
+      }
+    });
+
+    if (typeof document !== 'undefined' && document.documentElement) {
+      observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['data-theme'],
+      });
+    }
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      observer.disconnect();
+    };
   }, [draw]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
