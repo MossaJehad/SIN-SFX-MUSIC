@@ -1,0 +1,64 @@
+.acorn-card {
+  background-color: var(--color-surface);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--border-radius-medium);
+  box-shadow: var(--box-shadow-1);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.acorn-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--border-width) solid var(--color-border-subtle);
+  background-color: var(--color-canvas-subtle);
+  min-height: 38px;
+  gap: var(--space-2);
+}
+
+.acorn-card__header-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: hidden;
+}
+
+.acorn-card__title {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1.2;
+}
+
+.acorn-card__subtitle {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: 1.2;
+}
+
+.acorn-card__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-15);
+  flex-shrink: 0;
+}
+
+.acorn-card__body {
+  padding: var(--space-3);
+  flex: 1;
+  overflow-y: auto;
+}
+
+.acorn-card--compact .acorn-card__header {
+  padding: var(--space-15) var(--space-2);
+  min-height: 32px;
+}
+
+.acorn-card--compact .acorn-card__body {
+  padding: var(--space-2);
+}

@@ -1,0 +1,47 @@
+.acorn-select-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.acorn-select-label {
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  color: var(--color-text-subtle);
+}
+
+.acorn-select-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.acorn-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--color-surface);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--border-radius-small);
+  color: var(--color-text);
+  font-family: var(--font-family-sans);
+  font-size: var(--font-size-base);
+  height: 28px;
+  padding: 0 var(--space-5) 0 var(--space-2);
+  cursor: pointer;
+  width: 100%;
+  transition: border-color var(--transition-speed);
+}
+
+.acorn-select:focus-visible {
+  border-color: var(--color-accent-primary);
+  outline: var(--focus-outline);
+  outline-offset: var(--focus-outline-offset);
+}
+
+.acorn-select-arrow {
+  position: absolute;
+  right: var(--space-2);
+  pointer-events: none;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}

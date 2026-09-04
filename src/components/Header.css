@@ -1,0 +1,74 @@
+.acorn-app-header {
+  height: 48px;
+  background-color: var(--color-surface);
+  border-bottom: var(--border-width) solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-4);
+  gap: var(--space-4);
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.acorn-app-header__left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  overflow-x: auto;
+}
+
+.acorn-app-header__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.acorn-app-header__logo-icon {
+  color: var(--color-accent-primary);
+}
+
+.acorn-app-header__title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 700;
+  color: var(--color-text);
+  line-height: 1.1;
+  letter-spacing: -0.2px;
+}
+
+.acorn-app-header__version {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+}
+
+.acorn-app-header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.acorn-app-header__example-wrapper {
+  width: 170px;
+}
+
+.acorn-app-header__right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.acorn-app-header__preset-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-15);
+}
+
+.acorn-app-header__label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-subtle);
+  user-select: none;
+}

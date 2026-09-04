@@ -1,0 +1,82 @@
+.acorn-app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  background-color: var(--color-canvas);
+  color: var(--color-text);
+  font-family: var(--font-family-sans);
+}
+
+.acorn-app-mobile-nav {
+  display: none;
+}
+
+.acorn-app-workspace {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 320px 1fr 420px;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  overflow: hidden;
+  min-height: 0;
+}
+
+.workspace-column {
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.column--original {
+  min-width: 290px;
+}
+
+.column--editor {
+  min-width: 380px;
+}
+
+.column--output {
+  min-width: 360px;
+}
+
+.output-column-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Tablet & Mobile Layouts */
+@media (max-width: 1160px) {
+  .acorn-app-workspace {
+    grid-template-columns: 310px 1fr;
+  }
+  .column--output {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 900px) {
+  .acorn-app-mobile-nav {
+    display: block;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .acorn-app-workspace {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-2);
+    overflow-y: auto;
+  }
+
+  .workspace-column {
+    display: none;
+    height: auto;
+    overflow: visible;
+  }
+
+  .workspace-column--visible {
+    display: block;
+  }
+}

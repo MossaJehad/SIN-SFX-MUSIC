@@ -1,0 +1,123 @@
+.acorn-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-15);
+  font-family: var(--font-family-sans);
+  font-weight: 500;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  border-radius: var(--border-radius-small);
+  border: var(--border-width) solid transparent;
+  transition:
+    background-color var(--transition-speed),
+    border-color var(--transition-speed),
+    color var(--transition-speed);
+  user-select: none;
+  white-space: nowrap;
+}
+
+.acorn-button:focus-visible {
+  outline: var(--focus-outline);
+  outline-offset: var(--focus-outline-offset);
+}
+
+.acorn-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Sizes */
+.acorn-button--xs {
+  height: 22px;
+  padding: 0 var(--space-15);
+  font-size: var(--font-size-xs);
+}
+
+.acorn-button--sm {
+  height: 28px;
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-base);
+}
+
+.acorn-button--md {
+  height: 34px;
+  padding: 0 var(--space-3);
+  font-size: var(--font-size-md);
+}
+
+.acorn-button--icon-only {
+  padding: 0;
+  width: 28px;
+  height: 28px;
+}
+
+.acorn-button--xs.acorn-button--icon-only {
+  width: 22px;
+  height: 22px;
+}
+
+.acorn-button--md.acorn-button--icon-only {
+  width: 34px;
+  height: 34px;
+}
+
+/* Variants */
+.acorn-button--primary {
+  background-color: var(--color-accent-primary);
+  color: var(--color-text-inverse);
+  border-color: transparent;
+}
+.acorn-button--primary:hover:not(:disabled) {
+  background-color: var(--color-accent-primary-hover);
+}
+.acorn-button--primary:active:not(:disabled) {
+  background-color: var(--color-accent-primary-active);
+}
+
+.acorn-button--secondary {
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+.acorn-button--secondary:hover:not(:disabled) {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-text-muted);
+}
+.acorn-button--secondary:active:not(:disabled) {
+  background-color: var(--color-surface-active);
+}
+
+.acorn-button--ghost {
+  background-color: transparent;
+  color: var(--color-text);
+  border-color: transparent;
+}
+.acorn-button--ghost:hover:not(:disabled) {
+  background-color: var(--color-surface-hover);
+}
+.acorn-button--ghost:active:not(:disabled) {
+  background-color: var(--color-surface-active);
+}
+
+.acorn-button--active {
+  background-color: var(--color-accent-primary-subtle);
+  color: var(--color-accent-primary);
+  border-color: var(--color-accent-primary);
+}
+
+.acorn-button--destructive {
+  background-color: var(--color-surface);
+  color: var(--color-critical);
+  border-color: var(--color-border);
+}
+.acorn-button--destructive:hover:not(:disabled) {
+  background-color: var(--color-critical-subtle);
+  border-color: var(--color-critical-border);
+}
+.acorn-button--destructive:active:not(:disabled) {
+  background-color: var(--color-critical);
+  color: var(--color-text-inverse);
+}

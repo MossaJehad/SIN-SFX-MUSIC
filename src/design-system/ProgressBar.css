@@ -1,0 +1,27 @@
+.acorn-progress-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 100%;
+}
+
+.acorn-progress-label-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-subtle);
+}
+
+.acorn-progress-track {
+  height: 6px;
+  background-color: var(--color-canvas-subtle);
+  border-radius: var(--border-radius-circle);
+  overflow: hidden;
+  border: 1px solid var(--color-border-subtle);
+}
+
+.acorn-progress-fill {
+  height: 100%;
+  background-color: var(--color-accent-primary);
+  transition: width 150ms ease-out;
+}
