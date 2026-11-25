@@ -1,77 +1,85 @@
 /// <reference lib="webworker" />
-import { AudioAnalysisResult } from '@/types/analysis';
-import { generateRecipeFromAnalysis } from '@/audio/synthesis/generator';
-import { PresetKey } from '@/config/appConfig';
+import { ReconstructionConfig } from '@/types/mathModel';
+import { convertAudioToMath } from '@/audio/math/mathPipeline';
 
-interface ConvertMessage {
-  type: 'CONVERT';
-  analysis: AudioAnalysisResult;
-  preset: PresetKey;
-  fileName: string;
-  fileSizeBytes: number;
+export interface WorkerConvertRequest {
+  type: 'CONVERT_MATH';
+  jobId: number;
+  channels: Float32Array[];
+  sampleRate: number;
+  config: ReconstructionConfig;
+  name: string;
 }
 
-interface CancelMessage {
+export interface WorkerCancelRequest {
   type: 'CANCEL';
+  jobId?: number;
 }
 
-type InMessage = ConvertMessage | CancelMessage;
+export type WorkerInMessage = WorkerConvertRequest | WorkerCancelRequest;
 
-let isCancelled = false;
+let cancelledJobId = -1;
 
-self.onmessage = async (e: MessageEvent<InMessage>) => {
-  const data = e.data;
+self.onmessage = (e: MessageEvent<WorkerInMessage>) => {
+  const msg = e.data;
 
-  if (data.type === 'CANCEL') {
-    isCancelled = true;
+  if (msg.type === 'CANCEL') {
+    cancelledJobId = msg.jobId ?? Number.MAX_SAFE_INTEGER;
     return;
   }
 
-  if (data.type === 'CONVERT') {
-    isCancelled = false;
+  if (msg.type === 'CONVERT_MATH') {
+    const { jobId, channels, sampleRate, config, name } = msg;
+    const isCancelled = () => cancelledJobId >= jobId;
+
     try {
-      // 1. Initial heuristic generation
-      self.postMessage({
-        type: 'PROGRESS',
-        progress: 0.2,
-        message: 'Generating heuristic synthesis layers...',
+      const result = convertAudioToMath(channels, sampleRate, config, {
+        name,
+        isCancelled,
+        onProgress: (progress, stage) => {
+          if (!isCancelled()) {
+            self.postMessage({
+              type: 'PROGRESS',
+              jobId,
+              progress,
+              message: stage,
+            });
+          }
+        },
       });
 
-      const initialRecipe = generateRecipeFromAnalysis(
-        data.analysis,
-        data.preset,
-        data.fileName,
-        data.fileSizeBytes
-      );
-
-      self.postMessage({
-        type: 'PROGRESS',
-        progress: 0.5,
-        message: 'Refining envelope and frequency trajectory...',
-      });
-
-      // Simulation/optimization stages in worker
-      for (let step = 1; step <= 5; step++) {
-        if (isCancelled) {
-          self.postMessage({ type: 'CANCELLED' });
-          return;
-        }
-        await new Promise((r) => setTimeout(r, 40));
-        self.postMessage({
-          type: 'PROGRESS',
-          progress: 0.5 + step * 0.09,
-          message: `Optimizing timbre & spectral centroid (Pass ${step}/5)...`,
-        });
+      if (isCancelled()) {
+        self.postMessage({ type: 'CANCELLED', jobId });
+        return;
       }
 
-      self.postMessage({
-        type: 'COMPLETE',
-        recipe: initialRecipe,
-      });
+      // Transfer reconstructed and difference ArrayBuffers zero-copy back to main thread
+      const transferables: Transferable[] = [
+        ...result.reconstructedChannels.map((c) => c.buffer),
+        ...result.differenceChannels.map((c) => c.buffer),
+        result.metrics.spectrum.frequencies.buffer,
+        result.metrics.spectrum.originalDb.buffer,
+        result.metrics.spectrum.reconstructedDb.buffer,
+        result.metrics.spectrogram.originalDb.buffer,
+        result.metrics.spectrogram.reconstructedDb.buffer,
+      ];
+
+      self.postMessage(
+        {
+          type: 'COMPLETE',
+          jobId,
+          result,
+        },
+        transferables
+      );
     } catch (err: unknown) {
+      if (err instanceof Error && err.message === 'CANCELLED') {
+        self.postMessage({ type: 'CANCELLED', jobId });
+        return;
+      }
       const errorMsg =
-        err instanceof Error ? err.message : 'Unknown worker error during conversion';
-      self.postMessage({ type: 'ERROR', error: errorMsg });
+        err instanceof Error ? err.message : 'Unknown worker error during mathematical conversion';
+      self.postMessage({ type: 'ERROR', jobId, error: errorMsg });
     }
   }
 };

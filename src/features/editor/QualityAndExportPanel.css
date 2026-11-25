@@ -186,7 +186,20 @@
 
 .code-preview-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-1);
+}
+
+.code-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.preview-tab-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .preview-tab-btn {

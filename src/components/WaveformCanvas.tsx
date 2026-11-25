@@ -13,6 +13,8 @@ export interface WaveformCanvasProps {
   height?: number;
   label?: string;
   ariaLabel?: string;
+  /** Auto-scale quiet difference/residual waveforms to fill canvas height for visibility */
+  autoGain?: boolean;
 }
 
 interface MinMaxPeak {
@@ -53,6 +55,7 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
   height = 80,
   label,
   ariaLabel,
+  autoGain = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -60,15 +63,13 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
 
   const duration = explicitDuration ?? audioBuffer?.duration ?? 1;
 
-  // Extract real peaks from decoded AudioBuffer
-  const peaks = useMemo<MinMaxPeak[]>(() => {
-    if (!audioBuffer) return [];
+  // Extract real peaks accurately across the entire AudioBuffer (fixes short-buffer and tail truncation bugs)
+  const { peaks, maxAbsPeak } = useMemo<{ peaks: MinMaxPeak[]; maxAbsPeak: number }>(() => {
+    if (!audioBuffer || audioBuffer.length === 0) return { peaks: [], maxAbsPeak: 0 };
 
     const numChannels = audioBuffer.numberOfChannels;
     const totalSamples = audioBuffer.length;
-    // Resolution: 800 peak bins for smooth rendering
-    const binCount = 800;
-    const samplesPerBin = Math.max(1, Math.floor(totalSamples / binCount));
+    const binCount = Math.min(800, totalSamples);
     const result: MinMaxPeak[] = new Array(binCount);
 
     const channels: Float32Array[] = [];
@@ -76,26 +77,34 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
       channels.push(audioBuffer.getChannelData(c));
     }
 
+    let overallMax = 0;
     for (let b = 0; b < binCount; b++) {
+      const startIdx = Math.floor((b * totalSamples) / binCount);
+      const endIdx = Math.max(startIdx + 1, Math.floor(((b + 1) * totalSamples) / binCount));
       let minVal = 0;
       let maxVal = 0;
-      const startIdx = b * samplesPerBin;
-      const endIdx = Math.min(totalSamples, startIdx + samplesPerBin);
 
-      for (let i = startIdx; i < endIdx; i++) {
+      for (let i = startIdx; i < Math.min(totalSamples, endIdx); i++) {
         for (let c = 0; c < numChannels; c++) {
           const val = channels[c]![i]!;
           if (val < minVal) minVal = val;
           if (val > maxVal) maxVal = val;
+          const a = Math.abs(val);
+          if (a > overallMax) overallMax = a;
         }
       }
       result[b] = { min: minVal, max: maxVal };
     }
 
-    return result;
+    return { peaks: result, maxAbsPeak: overallMax };
   }, [audioBuffer]);
 
-  // Draw real waveform on HTML5 Canvas
+  const gainFactor = useMemo(() => {
+    if (!autoGain || maxAbsPeak <= 1e-12) return 1;
+    if (maxAbsPeak < 0.85) return Math.min(100000, 0.9 / maxAbsPeak);
+    return 1;
+  }, [autoGain, maxAbsPeak]);
+
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -115,7 +124,6 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
 
     const isDark = theme === 'dark' || document.documentElement.getAttribute('data-theme') === 'dark';
 
-    // Resolve colors dynamically from computed styles and current theme
     const waveColor = resolveCanvasColor(
       canvas,
       color,
@@ -141,11 +149,9 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
       isDark ? '#383441' : '#e3e2e7'
     );
 
-    // Clear background
     ctx.fillStyle = bgColor;
     ctx.fillRect(0, 0, width, h);
 
-    // Center baseline
     const midY = h / 2;
     ctx.strokeStyle = centerLineColor;
     ctx.lineWidth = 1;
@@ -155,7 +161,6 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
     ctx.stroke();
 
     if (peaks.length === 0) {
-      // Empty waveform placeholder
       const placeholderColor = resolveCanvasColor(
         canvas,
         undefined,
@@ -170,8 +175,10 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
       return;
     }
 
-    // Draw waveform peaks
-    const virtualWidth = width * zoom;
+    // Align buffer duration proportionally to shared timeline duration!
+    const bufDuration = audioBuffer?.duration ?? duration;
+    const durationRatio = duration > 0 ? Math.min(1, bufDuration / duration) : 1;
+    const virtualWidth = width * zoom * durationRatio;
     const step = virtualWidth / peaks.length;
 
     ctx.fillStyle = waveColor;
@@ -180,17 +187,18 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
       if (x > width) break;
 
       const p = peaks[i]!;
-      // Scale to height
-      const yTop = midY - p.max * (midY - 4);
-      const yBottom = midY - p.min * (midY - 4);
-      const barHeight = Math.max(1.5, yBottom - yTop);
+      const maxScaled = Math.max(-1, Math.min(1, p.max * gainFactor));
+      const minScaled = Math.max(-1, Math.min(1, p.min * gainFactor));
+      const yTop = midY - maxScaled * (midY - 4);
+      const yBottom = midY - minScaled * (midY - 4);
+      const barHeight = Math.max(1.2, yBottom - yTop);
 
       ctx.fillRect(x, yTop, Math.max(1, step * 0.9), barHeight);
     }
 
-    // Draw Playhead cursor
+    // Draw Playhead cursor (scaled by zoom)
     if (duration > 0 && currentTime >= 0) {
-      const cursorX = Math.min(width, (currentTime / duration) * width);
+      const cursorX = Math.min(width, (currentTime / duration) * width * zoom);
       ctx.strokeStyle = activeCursorColor;
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -198,7 +206,6 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
       ctx.lineTo(cursorX, h);
       ctx.stroke();
 
-      // Little playhead triangle cap
       ctx.fillStyle = activeCursorColor;
       ctx.beginPath();
       ctx.moveTo(cursorX - 4, 0);
@@ -207,14 +214,12 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
       ctx.closePath();
       ctx.fill();
     }
-  }, [peaks, currentTime, duration, color, cursorColor, zoom, theme]);
+  }, [peaks, audioBuffer, currentTime, duration, color, cursorColor, zoom, theme, gainFactor]);
 
-  // Redraw when draw dependencies (including theme) change
   useEffect(() => {
     draw();
   }, [draw]);
 
-  // Watch for window resize and DOM theme changes
   useEffect(() => {
     const handleResize = () => draw();
     window.addEventListener('resize', handleResize);
@@ -244,13 +249,18 @@ export const WaveformCanvas: React.FC<WaveformCanvasProps> = ({
     if (!onSeek || !canvasRef.current || duration <= 0) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
-    const seekTime = (x / rect.width) * duration;
-    onSeek(seekTime);
+    const seekTime = (x / (rect.width * zoom)) * duration;
+    onSeek(Math.min(duration, seekTime));
   };
+
+  const badgeText =
+    label && autoGain && maxAbsPeak > 1e-12 && gainFactor > 1.2
+      ? `${label} (×${gainFactor >= 100 ? Math.round(gainFactor) : gainFactor.toFixed(1)}, peak ${maxAbsPeak.toExponential(1)})`
+      : label;
 
   return (
     <div ref={containerRef} className="acorn-waveform-container" style={{ height }}>
-      {label && <div className="acorn-waveform-badge">{label}</div>}
+      {badgeText && <div className="acorn-waveform-badge">{badgeText}</div>}
       <canvas
         ref={canvasRef}
         className="acorn-waveform-canvas"

@@ -66,7 +66,7 @@ export const LayerEditor: React.FC = () => {
           <Button
             variant={isPlayingThis ? 'active' : 'primary'}
             size="xs"
-            onClick={isPlayingThis ? stopPlayback : playProcedural}
+            onClick={isPlayingThis ? () => stopPlayback(true) : () => playProcedural()}
             title="Preview procedural sound effect"
           >
             <AcornIcon name={isPlayingThis ? 'stop' : 'play'} size={12} />

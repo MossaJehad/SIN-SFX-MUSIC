@@ -7,6 +7,7 @@ import { ProgressBar } from '@/design-system/ProgressBar';
 import { AcornIcon } from '@/design-system/icons/AcornIcon';
 import { WaveformCanvas } from '@/components/WaveformCanvas';
 import { formatBytes } from '@/audio/export/sizeCalculator';
+import { ReconstructionMode } from '@/types/mathModel';
 import './OriginalAudioPanel.css';
 
 export const OriginalAudioPanel: React.FC = () => {
@@ -17,6 +18,7 @@ export const OriginalAudioPanel: React.FC = () => {
     originalSizeBytes,
     originalBuffer,
     originalAnalysis,
+    originalWarning,
     isOriginalLoading,
     originalError,
     loadAudioFromFile,
@@ -32,7 +34,8 @@ export const OriginalAudioPanel: React.FC = () => {
     playOriginal,
     stopPlayback,
     seek,
-    preset,
+    reconstructionConfig,
+    setReconstructionMode,
   } = useAudioStore();
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -50,12 +53,19 @@ export const OriginalAudioPanel: React.FC = () => {
     percussive: 'warning',
     noisy: 'default',
     mixed: 'success',
+    silent: 'default',
   };
+
+  const modes: { id: ReconstructionMode; label: string; hint: string }[] = [
+    { id: 'exact', label: 'Exact', hint: 'Numerical baseline (larger)' },
+    { id: 'optimized', label: 'Optimized', hint: 'Sinusoidal / STFT balance' },
+    { id: 'procedural', label: 'Procedural', hint: 'Compact analytical approx.' },
+  ];
 
   return (
     <Card
-      title="1. Original Audio"
-      subtitle="Source sound effect for DSP analysis"
+      title="1. Upload & Analyze"
+      subtitle="Decode PCM and extract spectral features"
       actions={
         originalBuffer && (
           <Button
@@ -74,12 +84,11 @@ export const OriginalAudioPanel: React.FC = () => {
       <input
         ref={fileInputRef}
         type="file"
-        accept="audio/wav,audio/mpeg,audio/ogg,audio/webm,audio/*,.wav,.mp3,.ogg,.webm"
+        accept="audio/wav,audio/mpeg,audio/ogg,audio/webm,audio/flac,audio/*,.wav,.mp3,.ogg,.webm,.flac,.m4a"
         className="visually-hidden"
         onChange={handleFileChange}
       />
 
-      {/* Error Message */}
       {originalError && (
         <div className="original-audio-panel__error" role="alert">
           <AcornIcon name="warning" size={16} className="original-audio-panel__error-icon" />
@@ -87,7 +96,13 @@ export const OriginalAudioPanel: React.FC = () => {
         </div>
       )}
 
-      {/* Empty / Upload State */}
+      {originalWarning && (
+        <div className="original-audio-panel__warning" role="status">
+          <AcornIcon name="info" size={14} className="original-audio-panel__error-icon" />
+          <div>{originalWarning}</div>
+        </div>
+      )}
+
       {!originalBuffer && !isOriginalLoading && (
         <div
           className="original-audio-panel__dropzone"
@@ -111,7 +126,7 @@ export const OriginalAudioPanel: React.FC = () => {
             <strong>Choose an audio file</strong> or drag and drop here
           </p>
           <span className="original-audio-panel__dropzone-hint">
-            WAV, MP3, OGG up to 3.0 seconds (Max 10 MB).
+            WAV, MP3, OGG, WebM, FLAC up to 15.0s (Max 25 MB).
           </span>
           <span className="original-audio-panel__dropzone-privacy">
             Processed 100% locally in your browser.
@@ -119,18 +134,15 @@ export const OriginalAudioPanel: React.FC = () => {
         </div>
       )}
 
-      {/* Loading State */}
       {isOriginalLoading && (
         <div className="original-audio-panel__loading">
           <div className="original-audio-panel__spinner" aria-hidden="true" />
-          <p>Decoding and analyzing audio in browser...</p>
+          <p>Decoding PCM & running spectral analysis...</p>
         </div>
       )}
 
-      {/* Loaded Audio Content */}
       {originalBuffer && !isOriginalLoading && (
         <div className="original-audio-panel__content">
-          {/* Metadata Bar */}
           <div className="original-audio-panel__meta-grid">
             <div className="meta-item meta-item--file">
               <span className="meta-label">File:</span>
@@ -154,7 +166,7 @@ export const OriginalAudioPanel: React.FC = () => {
               <span className="meta-label">Rate / Ch:</span>
               <span
                 className="meta-val"
-                title={`${originalBuffer.sampleRate} Hz · ${originalBuffer.numberOfChannels === 1 ? 'Mono' : 'Stereo'}`}
+                title={`${originalBuffer.sampleRate} Hz · ${originalBuffer.numberOfChannels === 1 ? 'Mono' : `${originalBuffer.numberOfChannels}ch Stereo`} · ${originalBuffer.length.toLocaleString()} samples`}
               >
                 {originalBuffer.sampleRate >= 1000
                   ? `${(originalBuffer.sampleRate / 1000).toFixed(1)} kHz`
@@ -164,13 +176,12 @@ export const OriginalAudioPanel: React.FC = () => {
             </div>
           </div>
 
-          {/* Waveform Player */}
           <div className="original-audio-panel__player-section">
             <div className="player-controls">
               <Button
                 variant={isPlayingThis ? 'active' : 'primary'}
                 size="sm"
-                onClick={isPlayingThis ? stopPlayback : playOriginal}
+                onClick={isPlayingThis ? () => stopPlayback(true) : () => playOriginal()}
                 aria-label={isPlayingThis ? 'Stop original audio' : 'Play original audio'}
               >
                 <AcornIcon name={isPlayingThis ? 'stop' : 'play'} size={14} />
@@ -188,11 +199,10 @@ export const OriginalAudioPanel: React.FC = () => {
               duration={originalBuffer.duration}
               onSeek={seek}
               height={70}
-              label="Original Input"
+              label="Original PCM"
             />
           </div>
 
-          {/* DSP Analysis Metrics */}
           {originalAnalysis && (
             <div className="original-audio-panel__analysis">
               <div className="analysis-header">
@@ -208,8 +218,8 @@ export const OriginalAudioPanel: React.FC = () => {
                 <div className="metric-box">
                   <span className="metric-label">Peak / RMS</span>
                   <span className="metric-val">
-                    {(originalAnalysis.peakAmplitude * 100).toFixed(0)}% /{' '}
-                    {(originalAnalysis.rmsLoudness * 100).toFixed(0)}%
+                    {originalAnalysis.peakAmplitude.toFixed(3)} /{' '}
+                    {originalAnalysis.rmsLoudness.toFixed(3)}
                   </span>
                 </div>
                 <div className="metric-box">
@@ -219,15 +229,22 @@ export const OriginalAudioPanel: React.FC = () => {
                   </span>
                 </div>
                 <div className="metric-box">
-                  <span className="metric-label">Tonal Ratio</span>
+                  <span className="metric-label">Dominant Pitch</span>
                   <span className="metric-val">
-                    {(originalAnalysis.tonalVsNoisyScore * 100).toFixed(0)}%
+                    {originalAnalysis.isSilent
+                      ? 'Silent'
+                      : Math.abs(
+                            originalAnalysis.endFrequencyEstimate -
+                              originalAnalysis.startFrequencyEstimate
+                          ) > 40
+                        ? `${Math.round(originalAnalysis.startFrequencyEstimate)}→${Math.round(originalAnalysis.endFrequencyEstimate)} Hz`
+                        : `${originalAnalysis.startFrequencyEstimate.toFixed(1)} Hz`}
                   </span>
                 </div>
                 <div className="metric-box">
                   <span className="metric-label">Attack / Decay</span>
                   <span className="metric-val">
-                    {(originalAnalysis.attackDuration * 1000).toFixed(0)}ms /{' '}
+                    {(originalAnalysis.attackDuration * 1000).toFixed(1)}ms /{' '}
                     {(originalAnalysis.decayDuration * 1000).toFixed(0)}ms
                   </span>
                 </div>
@@ -239,8 +256,23 @@ export const OriginalAudioPanel: React.FC = () => {
             </div>
           )}
 
-          {/* Conversion Action */}
+          {/* Reconstruction Mode Quick Selector & Convert Trigger */}
           <div className="original-audio-panel__convert-box">
+            <div className="mode-quick-switcher" role="group" aria-label="Reconstruction mode">
+              {modes.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={`mode-pill ${reconstructionConfig.mode === m.id ? 'mode-pill--active' : ''}`}
+                  onClick={() => setReconstructionMode(m.id)}
+                  title={m.hint}
+                  aria-pressed={reconstructionConfig.mode === m.id}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+
             {isConverting ? (
               <div className="convert-progress-wrapper">
                 <ProgressBar progress={conversionProgress} label={conversionStatusMessage} />
@@ -256,12 +288,15 @@ export const OriginalAudioPanel: React.FC = () => {
                 className="convert-button"
               >
                 <AcornIcon name="sparkle" size={16} />
-                Generate Procedural Version ({preset.toUpperCase()})
+                Convert to Math ({reconstructionConfig.mode.toUpperCase()})
               </Button>
             )}
             <p className="convert-disclaimer">
-              Deterministic approximation using oscillators, noise, envelopes, and filters. Not
-              lossless compression.
+              {reconstructionConfig.mode === 'exact'
+                ? 'Exact Fourier STFT baseline: numerical precision, typically larger than original audio.'
+                : reconstructionConfig.mode === 'optimized'
+                  ? 'Optimized sinusoidal/STFT resynthesis balancing fidelity, timing, and size.'
+                  : 'Procedural analytical approximation: smallest code size, approximate timbre.'}
             </p>
           </div>
         </div>

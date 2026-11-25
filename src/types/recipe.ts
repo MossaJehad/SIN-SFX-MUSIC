@@ -60,8 +60,8 @@ export interface RecipeMetadata {
   originalDuration?: number;
   originalSizeBytes?: number;
   approximationScore?: number;
-  generationPreset?: 'tiny' | 'balanced' | 'accurate';
-  classification?: 'tonal' | 'percussive' | 'noisy' | 'mixed';
+  generationPreset?: 'tiny' | 'balanced' | 'accurate' | 'exact';
+  classification?: 'tonal' | 'percussive' | 'noisy' | 'mixed' | 'silent';
   createdAt: string;
   generator: string;
 }

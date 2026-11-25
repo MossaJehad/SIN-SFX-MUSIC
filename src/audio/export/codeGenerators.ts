@@ -24,7 +24,8 @@ export function generateMinifiedJson(recipe: SoundRecipe): string {
 }
 
 /**
- * Generates a standalone, zero-dependency JavaScript module with Web Audio playback.
+ * Generates a standalone, zero-dependency JavaScript module with full Web Audio graph fidelity
+ * (includes ADSR sustain stage, HP/LP filters, FM, pan, waveshaper distortion, and delay).
  */
 export function generateStandaloneJs(recipe: SoundRecipe): string {
   const minifiedRecipe = JSON.stringify(recipe);
@@ -59,27 +60,20 @@ function createNoiseBuffer(ctx, duration, seed) {
 }
 
 function createDistortionCurve(amount) {
-  const k = (amount * 50) / (1 - Math.min(amount, 0.99) * 0.5);
+  const k = (amount * 50) / (1 - Math.min(amount, 0.999) * 0.5);
   const samples = 512;
   const curve = new Float32Array(samples);
   const deg = Math.PI / 180;
   for (let i = 0; i < samples; ++i) {
     const x = (i * 2) / samples - 1;
-    curve[i] = k === 0 ? x : ((3 + k) * x * 20 * deg) / (Math.PI + k * Math.abs(x));
+    curve[i] = k === 0 ? x : Math.max(-1, Math.min(1, ((3 + k) * x * 20 * deg) / (Math.PI + k * Math.abs(x))));
   }
   return curve;
 }
 
-/**
- * Plays the procedural sound effect.
- * @param {AudioContext|BaseAudioContext} [ctx] - Optional AudioContext instance. Creates one if omitted.
- * @param {Object} [options]
- * @param {number} [options.volume=1.0] - Master playback volume multiplier.
- * @param {AudioNode} [options.destination] - Destination node to connect to (defaults to ctx.destination).
- * @returns {{ stop: () => void, duration: number }} Playback control handle.
- */
 export function playSound(ctx, options = {}) {
-  const audioCtx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+  const AudioCtx = globalThis.AudioContext || globalThis.webkitAudioContext;
+  const audioCtx = ctx || new AudioCtx();
   if (audioCtx.state === 'suspended') {
     audioCtx.resume();
   }
@@ -93,12 +87,16 @@ export function playSound(ctx, options = {}) {
 
   const limiter = audioCtx.createDynamicsCompressor();
   limiter.threshold.setValueAtTime(-1, now);
+  limiter.knee.setValueAtTime(6, now);
+  limiter.ratio.setValueAtTime(12, now);
+  limiter.attack.setValueAtTime(0.002, now);
+  limiter.release.setValueAtTime(0.05, now);
   masterGain.connect(limiter);
   limiter.connect(destination);
 
-  const anySolo = recipe.layers.some(l => l.solo);
+  const anySolo = recipe.layers.some((l) => l.solo);
 
-  recipe.layers.forEach(layer => {
+  recipe.layers.forEach((layer) => {
     if (!layer.enabled) return;
     if (anySolo && !layer.solo) return;
 
@@ -113,27 +111,54 @@ export function playSound(ctx, options = {}) {
     } else {
       source = audioCtx.createOscillator();
       source.type = layer.oscillatorType;
-      source.frequency.setValueAtTime(layer.startFrequency, tStart);
-      if (layer.frequencyCurve === 'exponential') {
-        source.frequency.exponentialRampToValueAtTime(Math.max(10, layer.endFrequency), tEnd);
+      const f0 = Math.max(20, Math.min(22000, layer.startFrequency));
+      const f1 = Math.max(20, Math.min(22000, layer.endFrequency));
+      source.frequency.setValueAtTime(f0, tStart);
+      if (layer.frequencyCurve === 'exponential' && f0 > 0 && f1 > 0) {
+        source.frequency.exponentialRampToValueAtTime(f1, tEnd);
       } else if (layer.frequencyCurve === 'linear') {
-        source.frequency.linearRampToValueAtTime(layer.endFrequency, tEnd);
+        source.frequency.linearRampToValueAtTime(f1, tEnd);
+      }
+      if (layer.frequencyModulation && layer.frequencyModulation.enabled && layer.frequencyModulation.modDepth > 0) {
+        const fmOsc = audioCtx.createOscillator();
+        const fmGain = audioCtx.createGain();
+        fmOsc.frequency.setValueAtTime(layer.frequencyModulation.modFrequency, tStart);
+        fmGain.gain.setValueAtTime(layer.frequencyModulation.modDepth, tStart);
+        fmOsc.connect(fmGain);
+        fmGain.connect(source.frequency);
+        fmOsc.start(tStart);
+        fmOsc.stop(tEnd);
       }
     }
 
     const env = audioCtx.createGain();
-    const peak = layer.gain;
-    const sust = peak * (layer.envelope.sustain ?? 0);
-    const atk = Math.min(layer.envelope.attack, dur * 0.3);
-    const dec = Math.min(layer.envelope.decay, dur * 0.5);
+    const atk = Math.max(0.001, layer.envelope.attack);
+    const dec = Math.max(0.001, layer.envelope.decay);
+    const rel = Math.max(0.001, layer.envelope.release);
+    const peak = Math.max(0, Math.min(1.5, layer.gain));
+    const sust = peak * Math.max(0, Math.min(1, layer.envelope.sustain ?? 0));
+
+    const attackEnd = tStart + Math.min(atk, dur * 0.3);
+    const decayEnd = attackEnd + Math.min(dec, Math.max(0, dur - atk - rel));
+    const sustainEnd = Math.max(decayEnd, tEnd - rel);
 
     env.gain.setValueAtTime(0.0001, tStart);
-    env.gain.linearRampToValueAtTime(peak, tStart + atk);
-    env.gain.exponentialRampToValueAtTime(Math.max(0.0001, sust), tStart + atk + dec);
+    env.gain.linearRampToValueAtTime(peak, attackEnd);
+    env.gain.exponentialRampToValueAtTime(Math.max(0.0001, sust), decayEnd);
+    env.gain.setValueAtTime(Math.max(0.0001, sust), sustainEnd);
     env.gain.linearRampToValueAtTime(0.00001, tEnd);
 
     source.connect(env);
     let chain = env;
+
+    if (layer.highPassFilter && layer.highPassFilter.enabled) {
+      const hp = audioCtx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.setValueAtTime(layer.highPassFilter.cutoff, tStart);
+      hp.Q.setValueAtTime(layer.highPassFilter.q || 0.7, tStart);
+      chain.connect(hp);
+      chain = hp;
+    }
 
     if (layer.lowPassFilter && layer.lowPassFilter.enabled) {
       const lp = audioCtx.createBiquadFilter();
@@ -147,8 +172,37 @@ export function playSound(ctx, options = {}) {
     if (layer.distortion && layer.distortion.enabled && layer.distortion.amount > 0.01) {
       const dist = audioCtx.createWaveShaper();
       dist.curve = createDistortionCurve(layer.distortion.amount);
+      dist.oversample = '2x';
       chain.connect(dist);
       chain = dist;
+    }
+
+    if (typeof audioCtx.createStereoPanner === 'function' && layer.pan !== 0) {
+      const panner = audioCtx.createStereoPanner();
+      panner.pan.setValueAtTime(Math.max(-1, Math.min(1, layer.pan)), tStart);
+      chain.connect(panner);
+      chain = panner;
+    }
+
+    if (layer.delay && layer.delay.enabled && layer.delay.mix > 0.01) {
+      const dry = audioCtx.createGain();
+      const wet = audioCtx.createGain();
+      const delay = audioCtx.createDelay(1.0);
+      const fb = audioCtx.createGain();
+      delay.delayTime.setValueAtTime(Math.max(0.01, Math.min(0.5, layer.delay.time)), tStart);
+      fb.gain.setValueAtTime(Math.max(0, Math.min(0.9, layer.delay.feedback)), tStart);
+      const mix = Math.max(0, Math.min(1, layer.delay.mix));
+      dry.gain.setValueAtTime(1 - mix * 0.5, tStart);
+      wet.gain.setValueAtTime(mix, tStart);
+      chain.connect(dry);
+      chain.connect(delay);
+      delay.connect(fb);
+      fb.connect(delay);
+      delay.connect(wet);
+      const mixer = audioCtx.createGain();
+      dry.connect(mixer);
+      wet.connect(mixer);
+      chain = mixer;
     }
 
     chain.connect(masterGain);
@@ -161,36 +215,71 @@ export function playSound(ctx, options = {}) {
     stop: () => {
       masterGain.gain.setValueAtTime(masterGain.gain.value, audioCtx.currentTime);
       masterGain.gain.linearRampToValueAtTime(0.00001, audioCtx.currentTime + 0.05);
-    }
+    },
   };
 }
 `;
 }
 
 /**
- * Generates a standalone, fully-typed TypeScript module.
+ * Generates a 100% standalone, self-contained typed TypeScript module (zero external imports!).
  */
 export function generateStandaloneTs(recipe: SoundRecipe): string {
   const jsContent = generateStandaloneJs(recipe);
-  return (
-    `import type { SoundRecipe } from '@/types/recipe';\n\n` +
-    jsContent.replace('export const recipe =', 'export const recipe: SoundRecipe =').replace(
-      'export function playSound(ctx, options = {})',
-      `export interface PlaySoundOptions {
+  const inlineTypes = `export interface SoundRecipeLayer {
+  id: string;
+  name: string;
+  enabled: boolean;
+  solo: boolean;
+  oscillatorType: 'sine' | 'triangle' | 'square' | 'sawtooth' | 'noise';
+  startTime: number;
+  duration: number;
+  gain: number;
+  pan: number;
+  startFrequency: number;
+  endFrequency: number;
+  frequencyCurve: 'constant' | 'linear' | 'exponential';
+  envelope: { attack: number; decay: number; sustain: number; release: number };
+  lowPassFilter: { enabled: boolean; cutoff: number; q: number };
+  highPassFilter: { enabled: boolean; cutoff: number; q: number };
+  distortion: { enabled: boolean; amount: number };
+  delay: { enabled: boolean; time: number; feedback: number; mix: number };
+  frequencyModulation: { enabled: boolean; modFrequency: number; modDepth: number };
+  seed: number;
+}
+
+export interface StandaloneSoundRecipe {
+  version: 1;
+  name: string;
+  category?: string;
+  duration: number;
+  masterGain: number;
+  layers: SoundRecipeLayer[];
+}
+
+export interface PlaySoundOptions {
   volume?: number;
   destination?: AudioNode;
 }
+`;
 
-export function playSound(
-  ctx?: BaseAudioContext,
-  options: PlaySoundOptions = {}
-): { duration: number; stop: () => void }`
-    )
+  return (
+    inlineTypes +
+    '\n' +
+    jsContent
+      .replace('export const recipe =', 'export const recipe: StandaloneSoundRecipe =')
+      .replace('function createDeterministicRng(seed)', 'function createDeterministicRng(seed: number): () => number')
+      .replace('function createNoiseBuffer(ctx, duration, seed)', 'function createNoiseBuffer(ctx: BaseAudioContext, duration: number, seed: number): AudioBuffer')
+      .replace('function createDistortionCurve(amount)', 'function createDistortionCurve(amount: number): Float32Array<ArrayBuffer>')
+      .replace('export function playSound(ctx, options = {})', 'export function playSound(ctx?: BaseAudioContext, options: PlaySoundOptions = {}): { duration: number; stop: () => void }')
+      .replace('const AudioCtx = globalThis.AudioContext || globalThis.webkitAudioContext;', 'const AudioCtx = globalThis.AudioContext || (globalThis as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;')
+      .replace('let source;', 'let source: OscillatorNode | AudioBufferSourceNode;')
+      .replace('let chain = env;', 'let chain: AudioNode = env;')
   );
 }
 
 /**
- * Generates a runtime bundle containing player, types, recipe JSON, and documentation.
+ * Generates a runtime bundle containing standalone player, recipe JSON, and documentation.
  */
 export function generateRuntimePackage(recipe: SoundRecipe): Record<string, string> {
   const tsPlayer = generateStandaloneTs(recipe);
@@ -205,7 +294,6 @@ Generated with **Resonance SFX** — Local-first browser audio synthesizer.
 \`\`\`typescript
 import { playSound } from './player';
 
-// Trigger anywhere upon user interaction:
 const handle = playSound();
 console.log('Playing sound effect, duration:', handle.duration);
 \`\`\`

@@ -17,7 +17,7 @@ export const AboutModal: React.FC = () => {
           Close
         </Button>
       }
-      maxWidth="620px"
+      maxWidth="640px"
     >
       <div
         className="about-modal-content"
@@ -25,30 +25,39 @@ export const AboutModal: React.FC = () => {
       >
         <section>
           <h4 style={{ margin: '0 0 6px 0', fontSize: '14px', fontWeight: 600 }}>
-            What this MVP does
+            Genuine Audio-to-Math Sinusoidal Converter
           </h4>
           <p style={{ margin: 0, fontSize: '13px', lineHeight: 1.5 }}>
-            {APP_CONFIG.name} is a local-first web application that analyzes short game sound
-            effects (under 3.0s, under 10MB) such as UI clicks, coin pickups, lasers, jumps, hits,
-            and explosions, and converts them into small, editable procedural Web Audio recipes.
+            {APP_CONFIG.name} converts uploaded audio files (WAV, MP3, OGG, WebM, FLAC) into
+            standalone mathematical representations of the form{' '}
+            <code>S(t) = Σ A[n] · sin(2π · f[n] · t + φ[n])</code>. Reconstructed audio is
+            synthesized exclusively from those mathematical parameters without embedding original
+            audio or raw PCM arrays.
           </p>
         </section>
 
         <section>
           <h4 style={{ margin: '0 0 6px 0', fontSize: '14px', fontWeight: 600 }}>
-            What this MVP does NOT do
+            Three Reconstruction Modes & Honest Trade-offs
           </h4>
           <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '13px', lineHeight: 1.5 }}>
             <li>
-              It is <strong>not</strong> lossless audio compression. The procedural result is an
-              approximation.
+              <strong>Exact Reconstruction:</strong> Retains all STFT Fourier sinusoidal
+              coefficients (including DC, Nyquist, and exact phase) with COLA overlap-add. Achieves
+              numerical-precision reconstruction (SNR &gt; 120 dB), but usually requires{' '}
+              <strong>more storage</strong> than compressed MP3/OGG or 16-bit WAV.
             </li>
             <li>
-              It does not convert music, vocals, speech, or complex polyphonic orchestrations.
+              <strong>Optimized Reconstruction:</strong> Uses McAulay-Quatieri zero-phase
+              sinusoidal track resynthesis (with cubic phase continuity) or sparse STFT pruning plus
+              optional deterministic residual noise to balance fidelity, transients, and size.
             </li>
             <li>
-              No cloud AI, server processing, accounts, or telemetry. Everything runs locally in
-              this browser tab.
+              <strong>Procedural Reconstruction:</strong> Fits compact closed-form analytical
+              functions (sine waves, frequency sweeps, FM/AM, exponential envelopes) via orthogonal
+              projection. Smallest output size, clearly labeled as an approximation — broadband
+              explosions and complex environmental sounds cannot be represented losslessly with only
+              a handful of sine waves.
             </li>
           </ul>
         </section>
@@ -58,7 +67,7 @@ export const AboutModal: React.FC = () => {
             Design System & Iconography
           </h4>
           <p style={{ margin: 0, fontSize: '13px', lineHeight: 1.5 }}>
-            Built using design tokens and visual guidelines inspired by Mozilla Firefox's{' '}
+            Built with design tokens inspired by Mozilla Firefox&apos;s{' '}
             <strong>Acorn Design System</strong>. Iconography is derived from official Mozilla Acorn
             icons licensed under the <strong>Mozilla Public License Version 2.0 (MPL-2.0)</strong>.
           </p>
@@ -70,10 +79,10 @@ export const AboutModal: React.FC = () => {
           </h4>
           <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '13px', lineHeight: 1.5 }}>
             <li>
-              <kbd>Ctrl+Z</kbd> / <kbd>Cmd+Z</kbd>: Undo recipe parameter edit
+              <kbd>Ctrl+Z</kbd> / <kbd>Cmd+Z</kbd>: Undo manual layer edit
             </li>
             <li>
-              <kbd>Ctrl+Y</kbd> / <kbd>Cmd+Shift+Z</kbd>: Redo recipe parameter edit
+              <kbd>Ctrl+Y</kbd> / <kbd>Cmd+Shift+Z</kbd>: Redo manual layer edit
             </li>
             <li>
               <kbd>Left</kbd> / <kbd>Right</kbd> arrow keys: Scrub audio cursor when waveform canvas
@@ -90,8 +99,8 @@ export const AboutModal: React.FC = () => {
           <p
             style={{ margin: 0, fontSize: '13px', lineHeight: 1.5, color: 'var(--color-success)' }}
           >
-            "{APP_CONFIG.privacyNotice}" The application makes zero outbound network requests
-            containing your audio.
+            &ldquo;{APP_CONFIG.privacyNotice}&rdquo; All DSP analysis, Web Worker conversion, and
+            code exports run 100% locally in your browser with zero external requests.
           </p>
         </section>
       </div>
