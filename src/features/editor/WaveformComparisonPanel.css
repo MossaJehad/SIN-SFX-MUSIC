@@ -31,7 +31,71 @@
 .playback-buttons {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-15);
+}
+
+.viz-tabs-bar {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--color-border-subtle);
+  padding-bottom: var(--space-1);
+}
+
+.viz-tab-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--border-radius-xsmall);
+  padding: 4px 8px;
+  font-family: var(--font-family-sans);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  color: var(--color-text-subtle);
+  cursor: pointer;
+}
+
+.viz-tab-btn:hover {
+  color: var(--color-text);
+  background-color: var(--color-surface-hover);
+}
+
+.viz-tab-btn.active {
+  color: var(--color-accent-primary);
+  background-color: var(--color-surface);
+  border-color: var(--color-border);
+  font-weight: 600;
+}
+
+.dsp-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-15);
+}
+
+.dsp-metric-cell {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--border-radius-xsmall);
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.dsp-metric-label {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+}
+
+.dsp-metric-val {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cursor-time {

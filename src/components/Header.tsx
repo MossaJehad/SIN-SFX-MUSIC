@@ -24,7 +24,7 @@ export const Header: React.FC = () => {
     const file = e.target.files?.[0];
     if (file) {
       await loadAudioFromFile(file);
-      e.target.value = ''; // Reset input
+      e.target.value = '';
     }
   };
 
@@ -32,7 +32,7 @@ export const Header: React.FC = () => {
     const val = e.target.value;
     if (val) {
       await loadExampleRecipe(val);
-      e.target.value = ''; // Reset
+      e.target.value = '';
     }
   };
 
@@ -42,11 +42,10 @@ export const Header: React.FC = () => {
 
   return (
     <header className="acorn-app-header">
-      {/* Hidden file input */}
       <input
         ref={fileInputRef}
         type="file"
-        accept="audio/wav,audio/mpeg,audio/ogg,audio/webm,audio/*,.wav,.mp3,.ogg,.webm"
+        accept="audio/wav,audio/mpeg,audio/ogg,audio/webm,audio/flac,audio/*,.wav,.mp3,.ogg,.webm,.flac,.m4a"
         className="visually-hidden"
         onChange={handleFileChange}
         aria-label="Upload Audio File"
@@ -57,7 +56,7 @@ export const Header: React.FC = () => {
           <AcornIcon name="wave" size={20} className="acorn-app-header__logo-icon" />
           <div>
             <h1 className="acorn-app-header__title">{APP_CONFIG.name}</h1>
-            <span className="acorn-app-header__version">v{APP_CONFIG.version} MVP</span>
+            <span className="acorn-app-header__version">v{APP_CONFIG.version} DSP</span>
           </div>
         </div>
 
@@ -66,7 +65,7 @@ export const Header: React.FC = () => {
             variant="secondary"
             size="sm"
             onClick={clearOriginalAudio}
-            title="Start new project with default procedural template"
+            title="Clear uploaded audio and reset workspace"
           >
             New Project
           </Button>
@@ -75,7 +74,7 @@ export const Header: React.FC = () => {
             variant="primary"
             size="sm"
             onClick={() => fileInputRef.current?.click()}
-            title="Upload short WAV, MP3, or OGG audio file (< 3s, < 10MB)"
+            title="Upload WAV, MP3, OGG, WebM, or FLAC audio file (up to 15s, 25 MB)"
           >
             <AcornIcon name="upload" size={14} />
             Upload Audio
@@ -101,7 +100,6 @@ export const Header: React.FC = () => {
       </div>
 
       <div className="acorn-app-header__right">
-        {/* Preset Selector */}
         <div className="acorn-app-header__preset-group">
           <span className="acorn-app-header__label">Preset:</span>
           <Select
@@ -109,15 +107,15 @@ export const Header: React.FC = () => {
             aria-label="Quality preset"
             value={preset}
             options={[
-              { value: 'tiny', label: 'Tiny (Minimal Size)' },
-              { value: 'balanced', label: 'Balanced (Recommended)' },
-              { value: 'accurate', label: 'Accurate (Multi-layer)' },
+              { value: 'tiny', label: 'Tiny (Procedural)' },
+              { value: 'balanced', label: 'Balanced (Optimized)' },
+              { value: 'accurate', label: 'Accurate (High-Res)' },
+              { value: 'exact', label: 'Exact (Fourier Baseline)' },
             ]}
             onChange={(e) => setPreset(e.target.value as PresetKey)}
           />
         </div>
 
-        {/* Theme Toggle */}
         <Button
           variant="ghost"
           size="icon"
@@ -128,7 +126,6 @@ export const Header: React.FC = () => {
           <AcornIcon name={theme === 'light' ? 'moon' : 'sun'} size={16} />
         </Button>
 
-        {/* Help / About */}
         <Button
           variant="ghost"
           size="icon"

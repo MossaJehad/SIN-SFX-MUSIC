@@ -10,6 +10,10 @@
   gap: var(--space-2);
 }
 
+.procedural-editor-panel__tabs {
+  margin-bottom: var(--space-2);
+}
+
 .procedural-editor-panel__inner {
   display: flex;
   flex-direction: column;
@@ -25,4 +29,109 @@
 .procedural-editor-panel__layer-params {
   flex: 1;
   overflow-y: auto;
+}
+
+.math-controls-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  overflow-y: auto;
+}
+
+.math-section {
+  background-color: var(--color-canvas-subtle);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--border-radius-small);
+  padding: var(--space-25, 10px) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.math-section__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.mode-info-banner {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-subtle);
+  background-color: var(--color-surface);
+  border-left: 3px solid var(--color-accent-primary);
+  padding: var(--space-15) var(--space-2);
+  border-radius: var(--border-radius-xsmall);
+  line-height: 1.4;
+}
+
+.checkbox-controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding-top: var(--space-1);
+}
+
+.advanced-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.math-formula-box {
+  background-color: var(--color-surface);
+}
+
+.formula-equation {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-accent-primary);
+  background-color: var(--color-canvas-subtle);
+  padding: var(--space-15) var(--space-2);
+  border-radius: var(--border-radius-xsmall);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.formula-notes {
+  margin: 0;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+  line-height: 1.35;
+}
+
+.formula-terms-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.formula-term-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-15);
+  font-family: var(--font-family-mono);
+  font-size: 11px;
+  padding: 2px 6px;
+  background-color: var(--color-canvas-subtle);
+  border-radius: var(--border-radius-xsmall);
+  color: var(--color-text);
+  overflow-x: auto;
+}
+
+.term-idx {
+  color: var(--color-text-muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.formula-placeholder {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: 1.4;
 }

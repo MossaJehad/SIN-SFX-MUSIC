@@ -1,33 +1,67 @@
 import { create } from 'zustand';
 import { SoundRecipe, SoundLayer } from '@/types/recipe';
 import { AudioAnalysisResult } from '@/types/analysis';
-import { PresetKey, APP_CONFIG } from '@/config/appConfig';
-import { ComparisonMetrics, calculateApproximationScore } from '@/audio/comparison/comparator';
+import {
+  ExecutionTimings,
+  ExportLanguage,
+  MathConversionResult,
+  MathSoundModel,
+  ReconstructionConfig,
+  ReconstructionMetrics,
+  ReconstructionMode,
+} from '@/types/mathModel';
+import { APP_CONFIG, DEFAULT_RECONSTRUCTION_CONFIG, PresetKey } from '@/config/appConfig';
+import {
+  ComparisonMetrics,
+  calculateApproximationScore,
+  compareAudioSignals,
+} from '@/audio/comparison/comparator';
 import { BUILT_IN_EXAMPLES } from '@/examples/builtInExamples';
 import { renderRecipeToBuffer } from '@/audio/rendering/renderer';
-import { analyzeAudioBuffer } from '@/audio/analysis/analyzer';
-import { loadAndDecodeAudioFile } from '@/audio/analysis/audioLoader';
-import { generateRecipeFromAnalysis } from '@/audio/synthesis/generator';
-import { optimizeRecipe } from '@/audio/synthesis/optimizer';
+import { analyzeAudioBuffer, analyzeAudioSamples } from '@/audio/analysis/analyzer';
+import {
+  createAudioBufferFromChannels,
+  extractAudioBufferChannels,
+  loadAndDecodeAudioFile,
+} from '@/audio/analysis/audioLoader';
+import { convertAudioToMath } from '@/audio/math/mathPipeline';
+import { proceduralModelToSoundRecipe } from '@/audio/math/proceduralEngine';
+import { resampleChannels } from '@/audio/analysis/resampler';
+
+export type PlaybackSource = 'original' | 'procedural' | 'difference' | null;
 
 export interface AudioStoreState {
   // Theme
   theme: 'light' | 'dark';
   setTheme: (theme: 'light' | 'dark') => void;
 
-  // Preset
+  // Preset & Mathematical Reconstruction Configuration
   preset: PresetKey;
   setPreset: (preset: PresetKey) => void;
+  reconstructionConfig: ReconstructionConfig;
+  updateReconstructionConfig: (partial: Partial<ReconstructionConfig>) => void;
+  setReconstructionMode: (mode: ReconstructionMode) => void;
 
   // Original Audio
   originalFileName: string | null;
   originalSizeBytes: number;
   originalBuffer: AudioBuffer | null;
+  originalChannels: Float32Array[] | null;
   originalAnalysis: AudioAnalysisResult | null;
+  originalWarning: string | null;
   isOriginalLoading: boolean;
   originalError: string | null;
 
-  // Procedural Recipe & Rendering
+  // Mathematical Conversion & Reconstructed Output
+  mathModel: MathSoundModel | null;
+  reconstructedChannels: Float32Array[] | null;
+  differenceBuffer: AudioBuffer | null;
+  reconstructionMetrics: ReconstructionMetrics | null;
+  executionTimings: ExecutionTimings | null;
+  exportLanguage: ExportLanguage;
+  setExportLanguage: (lang: ExportLanguage) => void;
+
+  // Procedural Recipe & Rendering (synced with Procedural mode & manual editor)
   recipe: SoundRecipe;
   renderedProceduralBuffer: AudioBuffer | null;
   comparisonMetrics: ComparisonMetrics | null;
@@ -42,15 +76,16 @@ export interface AudioStoreState {
 
   // Playback
   isPlaying: boolean;
-  activePlaybackSource: 'original' | 'procedural' | null;
+  activePlaybackSource: PlaybackSource;
   currentTime: number;
   playbackDuration: number;
-  isABModeActive: boolean;
   zoom: number;
 
   // UI Selection
   selectedLayerId: string | null;
   activeMainTab: 'editor' | 'comparison' | 'export';
+  editorSubTab: 'math' | 'layers';
+  setEditorSubTab: (tab: 'math' | 'layers') => void;
   isAboutModalOpen: boolean;
 
   // Actions
@@ -78,38 +113,135 @@ export interface AudioStoreState {
   setZoom: (zoom: number) => void;
 
   // Playback Actions
-  playOriginal: () => Promise<void>;
-  playProcedural: () => Promise<void>;
-  stopPlayback: () => void;
+  playOriginal: (fromTime?: number) => Promise<void>;
+  playProcedural: (fromTime?: number) => Promise<void>;
+  playDifference: (fromTime?: number) => Promise<void>;
+  stopPlayback: (resetCursor?: boolean) => void;
   toggleABPlayback: () => Promise<void>;
   seek: (seconds: number) => void;
 }
 
-// Global AudioContext management
+// Global AudioContext & Worker resource management (cleaned up deterministically)
 let globalAudioContext: AudioContext | null = null;
 let currentSourceNode: AudioBufferSourceNode | null = null;
-let playbackStartTime = 0;
+let playbackStartCtxTime = 0;
+let playbackStartOffset = 0;
 let animFrameId = 0;
-let cancelOptimizationFlag = false;
+let activeWorker: Worker | null = null;
+let currentJobId = 0;
+let cancelMainThreadFlag = false;
 
 function getAudioContext(): AudioContext {
-  if (!globalAudioContext) {
+  if (!globalAudioContext || globalAudioContext.state === 'closed') {
     const AudioContextClass =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     globalAudioContext = new AudioContextClass();
   }
   if (globalAudioContext.state === 'suspended') {
-    globalAudioContext.resume();
+    void globalAudioContext.resume();
   }
   return globalAudioContext;
 }
 
-// Initial default recipe (UI Click)
+function terminateActiveWorker(): void {
+  if (activeWorker) {
+    try {
+      activeWorker.postMessage({ type: 'CANCEL', jobId: currentJobId });
+      activeWorker.terminate();
+    } catch {
+      // Ignore cleanup errors
+    }
+    activeWorker = null;
+  }
+}
+
+function runMathConversionInWorker(
+  channels: Float32Array[],
+  sampleRate: number,
+  config: ReconstructionConfig,
+  name: string,
+  onProgress: (progress: number, message: string) => void
+): Promise<MathConversionResult> {
+  terminateActiveWorker();
+  const jobId = ++currentJobId;
+  cancelMainThreadFlag = false;
+
+  // Clone buffers before transfer so store retains originalChannels intact!
+  const clonedChannels = channels.map((c) => new Float32Array(c));
+
+  if (typeof Worker !== 'undefined') {
+    return new Promise((resolve, reject) => {
+      try {
+        const worker = new Worker(
+          new URL('../../workers/conversionWorker.ts', import.meta.url),
+          { type: 'module' }
+        );
+        activeWorker = worker;
+
+        worker.onmessage = (e: MessageEvent) => {
+          const data = e.data;
+          if (!data || data.jobId !== jobId) return;
+
+          if (data.type === 'PROGRESS') {
+            onProgress(data.progress, data.message);
+          } else if (data.type === 'COMPLETE') {
+            terminateActiveWorker();
+            resolve(data.result as MathConversionResult);
+          } else if (data.type === 'CANCELLED') {
+            terminateActiveWorker();
+            reject(new Error('CANCELLED'));
+          } else if (data.type === 'ERROR') {
+            terminateActiveWorker();
+            reject(new Error(data.error || 'Worker conversion failed'));
+          }
+        };
+
+        worker.onerror = (err) => {
+          terminateActiveWorker();
+          reject(new Error(err.message || 'Web Worker execution error'));
+        };
+
+        const transferables = clonedChannels.map((c) => c.buffer);
+        worker.postMessage(
+          {
+            type: 'CONVERT_MATH',
+            jobId,
+            channels: clonedChannels,
+            sampleRate,
+            config,
+            name,
+          },
+          transferables
+        );
+      } catch {
+        // Fallback cleanly if Worker instantiation is unsupported in test runner
+        try {
+          const result = convertAudioToMath(clonedChannels, sampleRate, config, {
+            name,
+            isCancelled: () => cancelMainThreadFlag,
+            onProgress,
+          });
+          resolve(result);
+        } catch (fallbackErr) {
+          reject(fallbackErr);
+        }
+      }
+    });
+  }
+
+  return Promise.resolve(
+    convertAudioToMath(clonedChannels, sampleRate, config, {
+      name,
+      isCancelled: () => cancelMainThreadFlag,
+      onProgress,
+    })
+  );
+}
+
 const defaultInitialRecipe = BUILT_IN_EXAMPLES['ui-click']!;
 
 export const useAudioStore = create<AudioStoreState>((set, get) => {
-  // Read initial theme preference from localStorage or system preference
   const savedTheme =
     typeof localStorage !== 'undefined' ? localStorage.getItem('resonance_theme') : null;
   const initialTheme: 'light' | 'dark' =
@@ -121,10 +253,62 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
         ? 'dark'
         : 'light';
 
-  // Apply initial theme to documentElement
   if (typeof document !== 'undefined') {
     document.documentElement.setAttribute('data-theme', initialTheme);
   }
+
+  const startBufferPlayback = (
+    buffer: AudioBuffer,
+    sourceKind: Exclude<PlaybackSource, null>,
+    requestedOffset?: number
+  ) => {
+    get().stopPlayback(false);
+
+    const ctx = getAudioContext();
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+
+    const offset =
+      requestedOffset !== undefined && requestedOffset >= 0 && requestedOffset < buffer.duration - 0.01
+        ? requestedOffset
+        : 0;
+
+    currentSourceNode = source;
+    playbackStartCtxTime = ctx.currentTime;
+    playbackStartOffset = offset;
+
+    set({
+      isPlaying: true,
+      activePlaybackSource: sourceKind,
+      currentTime: offset,
+      playbackDuration: Math.max(
+        buffer.duration,
+        get().originalBuffer?.duration || 0,
+        get().renderedProceduralBuffer?.duration || 0
+      ),
+    });
+
+    const updateCursor = () => {
+      if (currentSourceNode !== source) return;
+      const elapsed = playbackStartOffset + (ctx.currentTime - playbackStartCtxTime);
+      if (elapsed >= buffer.duration) {
+        get().stopPlayback(true);
+      } else {
+        set({ currentTime: elapsed });
+        animFrameId = requestAnimationFrame(updateCursor);
+      }
+    };
+    animFrameId = requestAnimationFrame(updateCursor);
+
+    source.onended = () => {
+      if (currentSourceNode === source) {
+        get().stopPlayback(true);
+      }
+    };
+
+    source.start(0, offset);
+  };
 
   return {
     theme: initialTheme,
@@ -139,14 +323,76 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
     },
 
     preset: 'balanced',
-    setPreset: (preset) => set({ preset }),
+    setPreset: (preset) => {
+      const presetDef = APP_CONFIG.presets[preset];
+      set((state) => ({
+        preset,
+        reconstructionConfig: {
+          ...state.reconstructionConfig,
+          ...presetDef.config,
+          mode: presetDef.mode,
+        },
+      }));
+    },
+
+    reconstructionConfig: { ...DEFAULT_RECONSTRUCTION_CONFIG },
+    updateReconstructionConfig: (partial) =>
+      set((state) => {
+        const next = { ...state.reconstructionConfig, ...partial };
+        // Keep windowSize <= fftSize and hopSize <= windowSize
+        if (next.windowSize > next.fftSize) next.windowSize = next.fftSize;
+        if (next.hopSize > next.windowSize) next.hopSize = Math.max(32, next.windowSize >> 1);
+        if (next.minFrequency >= next.maxFrequency) {
+          next.maxFrequency = Math.min(24000, next.minFrequency + 100);
+        }
+        return { reconstructionConfig: next };
+      }),
+    setReconstructionMode: (mode: ReconstructionMode) =>
+      set((state) => {
+        const defaultsForMode: Partial<ReconstructionConfig> =
+          mode === 'exact'
+            ? {
+                mode: 'exact',
+                preservePhase: true,
+                minFrequency: 0,
+                maxFrequency: 24000,
+                fftSize: Math.min(2048, state.reconstructionConfig.fftSize),
+                windowSize: Math.min(2048, state.reconstructionConfig.fftSize),
+                hopSize: Math.min(2048, state.reconstructionConfig.fftSize) >> 1,
+                compressionAggressiveness: 0,
+              }
+            : mode === 'procedural'
+              ? {
+                  mode: 'procedural',
+                  maxOscillators: Math.min(12, state.reconstructionConfig.maxOscillators),
+                }
+              : {
+                  mode: 'optimized',
+                };
+        return {
+          reconstructionConfig: {
+            ...state.reconstructionConfig,
+            ...defaultsForMode,
+          },
+        };
+      }),
 
     originalFileName: null,
     originalSizeBytes: 0,
     originalBuffer: null,
+    originalChannels: null,
     originalAnalysis: null,
+    originalWarning: null,
     isOriginalLoading: false,
     originalError: null,
+
+    mathModel: null,
+    reconstructedChannels: null,
+    differenceBuffer: null,
+    reconstructionMetrics: null,
+    executionTimings: null,
+    exportLanguage: 'js',
+    setExportLanguage: (exportLanguage) => set({ exportLanguage }),
 
     recipe: defaultInitialRecipe,
     renderedProceduralBuffer: null,
@@ -163,38 +409,46 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
     activePlaybackSource: null,
     currentTime: 0,
     playbackDuration: defaultInitialRecipe.duration,
-    isABModeActive: false,
     zoom: 1,
 
     selectedLayerId: defaultInitialRecipe.layers[0]?.id || null,
     activeMainTab: 'editor',
+    editorSubTab: 'layers',
+    setEditorSubTab: (editorSubTab) => set({ editorSubTab }),
     isAboutModalOpen: false,
 
     loadAudioFromFile: async (file: File) => {
-      set({ isOriginalLoading: true, originalError: null });
-      get().stopPlayback();
+      set({ isOriginalLoading: true, originalError: null, originalWarning: null });
+      get().stopPlayback(true);
+      terminateActiveWorker();
 
       try {
         const audioCtx = getAudioContext();
         const loaded = await loadAndDecodeAudioFile(file, audioCtx);
-        const analysis = analyzeAudioBuffer(loaded.buffer);
+        const analysis = analyzeAudioSamples(loaded.channels, loaded.buffer.sampleRate);
 
-        set({
+        const nyquist = Math.floor(loaded.buffer.sampleRate / 2);
+
+        set((state) => ({
           originalFileName: loaded.fileName,
           originalSizeBytes: loaded.originalSizeBytes,
           originalBuffer: loaded.buffer,
+          originalChannels: loaded.channels,
           originalAnalysis: analysis,
+          originalWarning: loaded.warning ?? null,
           isOriginalLoading: false,
-          playbackDuration: Math.max(loaded.buffer.duration, get().recipe.duration),
-        });
-
-        // If procedural buffer is already rendered, update comparison metrics
-        const procBuffer = get().renderedProceduralBuffer;
-        if (procBuffer) {
-          const procAnalysis = analyzeAudioBuffer(procBuffer);
-          const metrics = calculateApproximationScore(analysis, procAnalysis);
-          set({ comparisonMetrics: metrics });
-        }
+          mathModel: null,
+          reconstructedChannels: null,
+          differenceBuffer: null,
+          reconstructionMetrics: null,
+          executionTimings: null,
+          editorSubTab: 'math',
+          reconstructionConfig: {
+            ...state.reconstructionConfig,
+            maxFrequency: Math.min(state.reconstructionConfig.maxFrequency, nyquist),
+          },
+          playbackDuration: Math.max(loaded.buffer.duration, state.recipe.duration),
+        }));
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Failed to load audio file.';
         set({ isOriginalLoading: false, originalError: message });
@@ -202,14 +456,23 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
     },
 
     clearOriginalAudio: () => {
-      get().stopPlayback();
+      get().stopPlayback(true);
+      terminateActiveWorker();
       set({
         originalFileName: null,
         originalSizeBytes: 0,
         originalBuffer: null,
+        originalChannels: null,
         originalAnalysis: null,
+        originalWarning: null,
         originalError: null,
+        mathModel: null,
+        reconstructedChannels: null,
+        differenceBuffer: null,
+        reconstructionMetrics: null,
+        executionTimings: null,
         comparisonMetrics: null,
+        isConverting: false,
       });
     },
 
@@ -217,14 +480,12 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
       const ex = BUILT_IN_EXAMPLES[exampleKey];
       if (!ex) return;
 
-      get().stopPlayback();
-
-      // Render procedural buffer
+      get().stopPlayback(true);
       set({ isRenderingProcedural: true });
+
       try {
         const rendered = await renderRecipeToBuffer(ex);
         const procAnalysis = analyzeAudioBuffer(rendered);
-
         const origAnalysis = get().originalAnalysis;
         const metrics = origAnalysis
           ? calculateApproximationScore(origAnalysis, procAnalysis)
@@ -236,6 +497,7 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
           comparisonMetrics: metrics,
           isRenderingProcedural: false,
           selectedLayerId: ex.layers[0]?.id || null,
+          editorSubTab: 'layers',
           playbackDuration: rendered.duration,
           currentTime: 0,
           history: [ex],
@@ -247,72 +509,103 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
     },
 
     generateProceduralApproximation: async () => {
-      const origAnalysis = get().originalAnalysis;
-      if (!origAnalysis) {
-        set({ originalError: 'Please upload or record audio before generating procedural sound.' });
+      const { originalChannels, originalBuffer, originalFileName, originalSizeBytes, reconstructionConfig } =
+        get();
+
+      if (!originalChannels || !originalBuffer) {
+        set({ originalError: 'Please upload an audio file before running mathematical conversion.' });
         return;
       }
 
-      get().stopPlayback();
-      cancelOptimizationFlag = false;
+      get().stopPlayback(true);
 
       set({
         isConverting: true,
-        conversionProgress: 0.1,
-        conversionStatusMessage: 'Analyzing frequency spectrum and onset dynamics...',
+        originalError: null,
+        conversionProgress: 0.05,
+        conversionStatusMessage: `Starting ${reconstructionConfig.mode} reconstruction in Web Worker...`,
       });
 
       try {
-        const preset = get().preset;
-        const initialRecipe = generateRecipeFromAnalysis(
-          origAnalysis,
-          preset,
-          get().originalFileName || 'Audio',
-          get().originalSizeBytes
+        const soundName = (originalFileName || 'Audio').replace(/\.[^/.]+$/, '');
+        const result = await runMathConversionInWorker(
+          originalChannels,
+          originalBuffer.sampleRate,
+          reconstructionConfig,
+          soundName,
+          (progress, message) => {
+            set({ conversionProgress: progress, conversionStatusMessage: message });
+          }
         );
 
-        set({
-          conversionProgress: 0.35,
-          conversionStatusMessage: 'Running deterministic heuristic optimization...',
-        });
+        const audioCtx = getAudioContext();
+        const reconBuffer = createAudioBufferFromChannels(
+          audioCtx,
+          result.reconstructedChannels,
+          result.sampleRate
+        );
+        const diffBuffer = createAudioBufferFromChannels(
+          audioCtx,
+          result.differenceChannels,
+          result.sampleRate
+        );
 
-        const optIterations = APP_CONFIG.presets[preset].optimizationIterations;
+        // Sync editable procedural recipe when in procedural mode
+        let nextRecipe = get().recipe;
+        if (result.model.representation === 'procedural-math') {
+          nextRecipe = proceduralModelToSoundRecipe(
+            result.model,
+            originalFileName ?? undefined,
+            originalSizeBytes
+          );
+        }
 
-        const optResult = await optimizeRecipe(initialRecipe, origAnalysis, {
-          maxIterations: optIterations,
-          isCancelled: () => cancelOptimizationFlag,
-          onProgress: (prog, score) => {
-            set({
-              conversionProgress: 0.35 + prog * 0.55,
-              conversionStatusMessage: `Refining parameter convergence (${score}% approx)...`,
-            });
-          },
-        });
-
-        const finalRecipe = optResult.optimizedRecipe;
-        const finalBuffer = await renderRecipeToBuffer(finalRecipe);
+        const compatComparison: ComparisonMetrics = {
+          approximationScore: result.metrics.approximationScore,
+          envelopeSimilarity: result.metrics.envelopeSimilarity,
+          spectralSimilarity: result.metrics.spectralSimilarity,
+          timbreSimilarity: result.metrics.timbreSimilarity,
+          durationDifferenceSeconds: result.metrics.durationDifferenceSeconds,
+          label: result.metrics.label,
+        };
 
         set((state) => ({
-          recipe: finalRecipe,
-          renderedProceduralBuffer: finalBuffer,
-          comparisonMetrics: optResult.metrics,
+          mathModel: result.model,
+          reconstructedChannels: result.reconstructedChannels,
+          renderedProceduralBuffer: reconBuffer,
+          differenceBuffer: diffBuffer,
+          reconstructionMetrics: result.metrics,
+          comparisonMetrics: compatComparison,
+          executionTimings: result.timings,
+          recipe: nextRecipe,
+          selectedLayerId: nextRecipe.layers[0]?.id || state.selectedLayerId,
           isConverting: false,
           conversionProgress: 1.0,
-          conversionStatusMessage: 'Complete',
-          selectedLayerId: finalRecipe.layers[0]?.id || null,
-          history: [...state.history.slice(0, state.historyIndex + 1), finalRecipe],
-          historyIndex: state.historyIndex + 1,
-          playbackDuration: Math.max(finalBuffer.duration, state.originalBuffer?.duration || 0),
+          conversionStatusMessage: `Complete (${result.timings.totalMs.toFixed(0)} ms)`,
+          playbackDuration: Math.max(reconBuffer.duration, originalBuffer.duration),
+          history:
+            result.model.representation === 'procedural-math'
+              ? [...state.history.slice(0, state.historyIndex + 1), nextRecipe]
+              : state.history,
+          historyIndex:
+            result.model.representation === 'procedural-math'
+              ? state.historyIndex + 1
+              : state.historyIndex,
         }));
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Error generating procedural audio.';
+        if (err instanceof Error && err.message === 'CANCELLED') {
+          set({ isConverting: false, conversionStatusMessage: 'Cancelled' });
+          return;
+        }
+        const message = err instanceof Error ? err.message : 'Error during mathematical reconstruction.';
         set({ isConverting: false, originalError: message });
       }
     },
 
     cancelConversion: () => {
-      cancelOptimizationFlag = true;
-      set({ isConverting: false, conversionStatusMessage: 'Cancelled' });
+      cancelMainThreadFlag = true;
+      terminateActiveWorker();
+      set({ isConverting: false, conversionStatusMessage: 'Cancelled', conversionProgress: 0 });
     },
 
     updateRecipe: async (updater, pushHistory = true) => {
@@ -335,19 +628,51 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
       });
 
       try {
-        const rendered = await renderRecipeToBuffer(newRecipe);
-        const procAnalysis = analyzeAudioBuffer(rendered);
-        const origAnalysis = get().originalAnalysis;
-        const metrics = origAnalysis
-          ? calculateApproximationScore(origAnalysis, procAnalysis)
-          : null;
+        const targetSr = get().originalBuffer?.sampleRate ?? 44100;
+        const rendered = await renderRecipeToBuffer(newRecipe, targetSr, 0);
+        const procChannels = extractAudioBufferChannels(rendered);
+        const origChannels = get().originalChannels;
+        const origBuffer = get().originalBuffer;
 
-        set({
-          renderedProceduralBuffer: rendered,
-          comparisonMetrics: metrics,
-          isRenderingProcedural: false,
-          playbackDuration: Math.max(rendered.duration, get().originalBuffer?.duration || 0),
-        });
+        if (origChannels && origBuffer) {
+          const alignedOrig =
+            origBuffer.sampleRate === rendered.sampleRate
+              ? origChannels
+              : resampleChannels(origChannels, origBuffer.sampleRate, rendered.sampleRate);
+          const { metrics, differenceChannels } = compareAudioSignals(
+            alignedOrig,
+            procChannels,
+            rendered.sampleRate
+          );
+          const diffBuf = createAudioBufferFromChannels(
+            getAudioContext(),
+            differenceChannels,
+            rendered.sampleRate
+          );
+          set({
+            renderedProceduralBuffer: rendered,
+            reconstructedChannels: procChannels,
+            differenceBuffer: diffBuf,
+            reconstructionMetrics: metrics,
+            comparisonMetrics: {
+              approximationScore: metrics.approximationScore,
+              envelopeSimilarity: metrics.envelopeSimilarity,
+              spectralSimilarity: metrics.spectralSimilarity,
+              timbreSimilarity: metrics.timbreSimilarity,
+              durationDifferenceSeconds: metrics.durationDifferenceSeconds,
+              label: metrics.label,
+            },
+            isRenderingProcedural: false,
+            playbackDuration: Math.max(rendered.duration, origBuffer.duration),
+          });
+        } else {
+          set({
+            renderedProceduralBuffer: rendered,
+            reconstructedChannels: procChannels,
+            isRenderingProcedural: false,
+            playbackDuration: rendered.duration,
+          });
+        }
       } catch {
         set({ isRenderingProcedural: false });
       }
@@ -394,7 +719,7 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
         seed: Math.floor(Math.random() * 10000),
       };
 
-      get().updateRecipe((prev) => ({
+      void get().updateRecipe((prev) => ({
         ...prev,
         layers: [...prev.layers, newLayer],
       }));
@@ -406,12 +731,12 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
       if (!target) return;
 
       const dup: SoundLayer = {
-        ...JSON.parse(JSON.stringify(target)),
+        ...(JSON.parse(JSON.stringify(target)) as SoundLayer),
         id: `layer-${Date.now()}`,
         name: `${target.name} (Copy)`,
       };
 
-      get().updateRecipe((prev) => ({
+      void get().updateRecipe((prev) => ({
         ...prev,
         layers: [...prev.layers, dup],
       }));
@@ -419,7 +744,7 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
     },
 
     deleteLayer: (layerId: string) => {
-      get().updateRecipe((prev) => ({
+      void get().updateRecipe((prev) => ({
         ...prev,
         layers: prev.layers.filter((l) => l.id !== layerId),
       }));
@@ -429,21 +754,21 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
     },
 
     toggleLayerEnabled: (layerId: string) => {
-      get().updateRecipe((prev) => ({
+      void get().updateRecipe((prev) => ({
         ...prev,
         layers: prev.layers.map((l) => (l.id === layerId ? { ...l, enabled: !l.enabled } : l)),
       }));
     },
 
     toggleLayerSolo: (layerId: string) => {
-      get().updateRecipe((prev) => ({
+      void get().updateRecipe((prev) => ({
         ...prev,
         layers: prev.layers.map((l) => (l.id === layerId ? { ...l, solo: !l.solo } : l)),
       }));
     },
 
     reorderLayers: (startIndex: number, endIndex: number) => {
-      get().updateRecipe((prev) => {
+      void get().updateRecipe((prev) => {
         const layers = [...prev.layers];
         const [moved] = layers.splice(startIndex, 1);
         if (moved) layers.splice(endIndex, 0, moved);
@@ -452,7 +777,7 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
     },
 
     updateLayer: (layerId: string, partial: Partial<SoundLayer>) => {
-      get().updateRecipe((prev) => ({
+      void get().updateRecipe((prev) => ({
         ...prev,
         layers: prev.layers.map((l) => (l.id === layerId ? { ...l, ...partial } : l)),
       }));
@@ -463,119 +788,74 @@ export const useAudioStore = create<AudioStoreState>((set, get) => {
     setIsAboutModalOpen: (isAboutModalOpen) => set({ isAboutModalOpen }),
     setZoom: (zoom) => set({ zoom }),
 
-    playOriginal: async () => {
+    playOriginal: async (fromTime?: number) => {
       const buffer = get().originalBuffer;
       if (!buffer) return;
-      get().stopPlayback();
-
-      const ctx = getAudioContext();
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(ctx.destination);
-
-      currentSourceNode = source;
-      playbackStartTime = ctx.currentTime;
-
-      set({
-        isPlaying: true,
-        activePlaybackSource: 'original',
-        playbackDuration: buffer.duration,
-      });
-
-      const updateCursor = () => {
-        const elapsed = ctx.currentTime - playbackStartTime;
-        if (elapsed >= buffer.duration) {
-          get().stopPlayback();
-        } else {
-          set({ currentTime: elapsed });
-          animFrameId = requestAnimationFrame(updateCursor);
-        }
-      };
-      animFrameId = requestAnimationFrame(updateCursor);
-
-      source.start(0);
-      source.onended = () => {
-        if (get().activePlaybackSource === 'original') {
-          get().stopPlayback();
-        }
-      };
+      startBufferPlayback(buffer, 'original', fromTime ?? get().currentTime);
     },
 
-    playProcedural: async () => {
-      // If rendered buffer is ready, play it; otherwise render it first
+    playProcedural: async (fromTime?: number) => {
       let buffer = get().renderedProceduralBuffer;
       if (!buffer) {
         buffer = await renderRecipeToBuffer(get().recipe);
         set({ renderedProceduralBuffer: buffer });
       }
-
-      get().stopPlayback();
-
-      const ctx = getAudioContext();
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(ctx.destination);
-
-      currentSourceNode = source;
-      playbackStartTime = ctx.currentTime;
-
-      set({
-        isPlaying: true,
-        activePlaybackSource: 'procedural',
-        playbackDuration: buffer.duration,
-      });
-
-      const updateCursor = () => {
-        const elapsed = ctx.currentTime - playbackStartTime;
-        if (elapsed >= buffer.duration) {
-          get().stopPlayback();
-        } else {
-          set({ currentTime: elapsed });
-          animFrameId = requestAnimationFrame(updateCursor);
-        }
-      };
-      animFrameId = requestAnimationFrame(updateCursor);
-
-      source.start(0);
-      source.onended = () => {
-        if (get().activePlaybackSource === 'procedural') {
-          get().stopPlayback();
-        }
-      };
+      startBufferPlayback(buffer, 'procedural', fromTime ?? get().currentTime);
     },
 
-    stopPlayback: () => {
+    playDifference: async (fromTime?: number) => {
+      const buffer = get().differenceBuffer;
+      if (!buffer) return;
+      startBufferPlayback(buffer, 'difference', fromTime ?? get().currentTime);
+    },
+
+    stopPlayback: (resetCursor = true) => {
       if (animFrameId) {
         cancelAnimationFrame(animFrameId);
         animFrameId = 0;
       }
       if (currentSourceNode) {
+        const node = currentSourceNode;
+        currentSourceNode = null;
+        node.onended = null;
         try {
-          currentSourceNode.stop();
-          currentSourceNode.disconnect();
+          node.stop();
+          node.disconnect();
         } catch {
           // Ignore if already stopped
         }
-        currentSourceNode = null;
       }
-      set({ isPlaying: false, activePlaybackSource: null, currentTime: 0 });
+      set((state) => ({
+        isPlaying: false,
+        activePlaybackSource: null,
+        currentTime: resetCursor ? 0 : state.currentTime,
+      }));
     },
 
     toggleABPlayback: async () => {
-      const active = get().activePlaybackSource;
-      if (active === 'original') {
-        await get().playProcedural();
+      const { activePlaybackSource, currentTime, isPlaying, originalBuffer } = get();
+      // Preserve synchronized playback cursor across A/B switches!
+      const resumePos = isPlaying ? currentTime : 0;
+      if (activePlaybackSource === 'original') {
+        await get().playProcedural(resumePos);
+      } else if (originalBuffer) {
+        await get().playOriginal(resumePos);
       } else {
-        if (get().originalBuffer) {
-          await get().playOriginal();
-        } else {
-          await get().playProcedural();
-        }
+        await get().playProcedural(resumePos);
       }
     },
 
     seek: (seconds: number) => {
-      set({ currentTime: Math.max(0, seconds) });
+      const target = Math.max(0, seconds);
+      const { isPlaying, activePlaybackSource } = get();
+      set({ currentTime: target });
+      if (isPlaying && activePlaybackSource === 'original') {
+        void get().playOriginal(target);
+      } else if (isPlaying && activePlaybackSource === 'procedural') {
+        void get().playProcedural(target);
+      } else if (isPlaying && activePlaybackSource === 'difference') {
+        void get().playDifference(target);
+      }
     },
   };
 });

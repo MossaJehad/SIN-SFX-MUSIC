@@ -3,40 +3,65 @@ import {
   EnvelopePoint,
   FrequencyPoint,
   SoundClassification,
+  SpectralPeakSummary,
 } from '@/types/analysis';
-import { LightweightFFT } from './fft';
+import {
+  createWindow,
+  createZeroPhaseWindow,
+  getCachedFFT,
+  HALF_PI,
+  nextPowerOf2,
+  wrapPhase,
+} from './fft';
+
+export const SILENCE_PEAK_THRESHOLD = 1e-6;
 
 /**
- * Converts any multi-channel audio buffer to a normalized mono Float32Array.
+ * Converts multi-channel PCM arrays into an averaged mono Float32Array for feature analysis.
+ * (Actual audio reconstruction preserves all channels independently.)
  */
-export function audioBufferToMono(buffer: AudioBuffer): Float32Array {
-  const numChannels = buffer.numberOfChannels;
-  const length = buffer.length;
+export function channelsToMono(channels: Float32Array[]): Float32Array {
+  if (channels.length === 0) return new Float32Array(0);
+  if (channels.length === 1) return new Float32Array(channels[0]!);
+
+  const length = channels[0]!.length;
   const mono = new Float32Array(length);
+  const invC = 1 / channels.length;
 
-  if (numChannels === 1) {
-    mono.set(buffer.getChannelData(0));
-    return mono;
-  }
-
-  // Downmix to mono by averaging all channels
-  for (let c = 0; c < numChannels; c++) {
-    const channelData = buffer.getChannelData(c);
-    for (let i = 0; i < length; i++) {
-      mono[i] = (mono[i] ?? 0) + (channelData[i] ?? 0) / numChannels;
+  for (let c = 0; c < channels.length; c++) {
+    const ch = channels[c]!;
+    const len = Math.min(length, ch.length);
+    for (let i = 0; i < len; i++) {
+      mono[i] = mono[i]! + ch[i]! * invC;
     }
   }
-
   return mono;
 }
 
 /**
+ * Converts any multi-channel AudioBuffer to a mono Float32Array.
+ */
+export function audioBufferToMono(buffer: AudioBuffer): Float32Array {
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    channels.push(buffer.getChannelData(c));
+  }
+  return channelsToMono(channels);
+}
+
+/**
  * Calculates Zero-Crossing Rate (ZCR) across the signal.
- * High ZCR (> 0.2) indicates high-frequency unpitched noise or sharp transients.
- * Low ZCR (< 0.08) indicates low/mid fundamental tonal content.
+ * Returns 0 for silent or DC signals.
  */
 export function calculateZeroCrossingRate(samples: Float32Array): number {
   if (samples.length < 2) return 0;
+  let maxAbs = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const a = Math.abs(samples[i]!);
+    if (a > maxAbs) maxAbs = a;
+  }
+  if (maxAbs < SILENCE_PEAK_THRESHOLD) return 0;
+
   let crossings = 0;
   for (let i = 1; i < samples.length; i++) {
     const s0 = samples[i - 1]!;
@@ -49,39 +74,55 @@ export function calculateZeroCrossingRate(samples: Float32Array): number {
 }
 
 /**
- * Calculates Spectral Centroid (frequency "center of mass") from a magnitude spectrum.
+ * Calculates Spectral Centroid (frequency center of mass in Hz) from a one-sided
+ * magnitude spectrum. Correctly handles both length N/2+1 (with Nyquist) and N/2.
  */
-export function calculateSpectralCentroid(magnitude: Float32Array, sampleRate: number): number {
+export function calculateSpectralCentroid(
+  magnitude: Float32Array | Float64Array,
+  sampleRate: number
+): number {
+  if (magnitude.length <= 1) return 0;
   let weightedSum = 0;
   let totalMagnitude = 0;
   const nyquist = sampleRate / 2;
-  const binWidth = nyquist / magnitude.length;
+  // For N/2 + 1 bins (odd length >= 3), last index corresponds to Nyquist (fs / 2).
+  // For legacy N/2 power-of-2 bins, binWidth = nyquist / length.
+  const isPowerOf2 = (magnitude.length & (magnitude.length - 1)) === 0;
+  const binWidth = isPowerOf2 ? nyquist / magnitude.length : nyquist / (magnitude.length - 1);
 
-  for (let i = 0; i < magnitude.length; i++) {
+  for (let i = 1; i < magnitude.length; i++) {
     const mag = magnitude[i]!;
     const freq = i * binWidth;
     weightedSum += freq * mag;
     totalMagnitude += mag;
   }
 
-  return totalMagnitude > 0.0001 ? weightedSum / totalMagnitude : 0;
+  return totalMagnitude > 1e-10 ? weightedSum / totalMagnitude : 0;
 }
 
 /**
  * Calculates Spectral Flatness (Wiener entropy) from magnitude spectrum.
- * Ratio of geometric mean to arithmetic mean.
- * Values close to 1.0 indicate white noise, while values near 0.0 indicate pure tones.
+ * Ratio of geometric mean to arithmetic mean of power spectrum (excluding DC).
+ * Values near 1.0 indicate white noise; near 0.0 indicate pure tones.
  */
-export function calculateSpectralFlatness(magnitude: Float32Array): number {
+export function calculateSpectralFlatness(magnitude: Float32Array | Float64Array): number {
+  const start = magnitude.length > 2 ? 1 : 0;
+  const count = magnitude.length - start;
+  if (count <= 0) return 0;
+
+  let maxMag = 0;
+  for (let i = start; i < magnitude.length; i++) {
+    if (magnitude[i]! > maxMag) maxMag = magnitude[i]!;
+  }
+  if (maxMag < 1e-10) return 0;
+
+  // Relative floor at -120 dB below peak so silence bins don't corrupt log
+  const floor = Math.max(1e-24, maxMag * maxMag * 1e-12);
   let logSum = 0;
   let sum = 0;
-  const count = magnitude.length;
-  if (count === 0) return 0;
 
-  const epsilon = 1e-10;
-
-  for (let i = 0; i < count; i++) {
-    const power = magnitude[i]! * magnitude[i]! + epsilon;
+  for (let i = start; i < magnitude.length; i++) {
+    const power = magnitude[i]! * magnitude[i]! + floor;
     logSum += Math.log(power);
     sum += power;
   }
@@ -89,185 +130,413 @@ export function calculateSpectralFlatness(magnitude: Float32Array): number {
   const geometricMean = Math.exp(logSum / count);
   const arithmeticMean = sum / count;
 
-  if (arithmeticMean <= epsilon) return 0;
+  if (arithmeticMean <= floor * 1.01) return 0;
   return Math.min(1.0, Math.max(0.0, geometricMean / arithmeticMean));
 }
 
-/**
- * Comprehensive browser-based audio analyzer for game sound effects.
- */
-export function analyzeAudioBuffer(
-  audioBuffer: AudioBuffer,
-  channelCount = audioBuffer.numberOfChannels
-): AudioAnalysisResult {
-  const sampleRate = audioBuffer.sampleRate;
-  const duration = audioBuffer.duration;
-  const samples = audioBufferToMono(audioBuffer);
-  const totalSamples = samples.length;
+export interface DetectedSpectralPeak {
+  bin: number; // fractional interpolated bin index
+  frequency: number; // Hz
+  amplitude: number; // true linear sine amplitude
+  phase: number; // sine phase in (-π, π] at frame center
+}
 
-  // 1. Peak & RMS
+/**
+ * Extracts parabolically-refined spectral peaks using zero-phase centered windowing.
+ * Guarantees sub-bin frequency accuracy (< 0.1 Hz for typical FFT sizes), coherent-gain-corrected
+ * true sine amplitude, and exact phase at `centerSample`.
+ */
+export function extractZeroPhaseSpectralPeaks(
+  samples: Float32Array,
+  centerSample: number,
+  sampleRate: number,
+  fftSize: number,
+  windowSize: number,
+  options: {
+    minFrequency?: number;
+    maxFrequency?: number;
+    minAmplitude?: number;
+    maxPeaks?: number;
+    windowType?: 'hann' | 'blackman-harris' | 'hamming' | 'sqrt-hann' | 'rectangular';
+  } = {}
+): DetectedSpectralPeak[] {
+  const {
+    minFrequency = 10,
+    maxFrequency = sampleRate / 2,
+    minAmplitude = 1e-5,
+    maxPeaks = 64,
+    windowType = 'hann',
+  } = options;
+
+  const actualWinSize = Math.min(fftSize, Math.max(16, windowSize));
+  const { window, halfLen, sum: winSum } = createZeroPhaseWindow(actualWinSize, windowType);
+  const fft = getCachedFFT(fftSize);
+  const real = new Float64Array(fftSize);
+  const imag = new Float64Array(fftSize);
+
+  // Zero-phase circular placement around centerSample:
+  // u = 0 .. +halfLen -> real[0 .. halfLen]
+  // u = -halfLen .. -1 -> real[fftSize - halfLen .. fftSize - 1]
+  for (let u = 0; u <= halfLen; u++) {
+    const idx = centerSample + u;
+    if (idx >= 0 && idx < samples.length) {
+      real[u] = samples[idx]! * window[halfLen + u]!;
+    }
+  }
+  for (let u = -halfLen; u < 0; u++) {
+    const idx = centerSample + u;
+    if (idx >= 0 && idx < samples.length) {
+      real[fftSize + u] = samples[idx]! * window[halfLen + u]!;
+    }
+  }
+
+  fft.transform(real, imag, false);
+
+  const half = fftSize >> 1;
+  const binRes = sampleRate / fftSize;
+  const mag = new Float64Array(half + 1);
+  for (let k = 0; k <= half; k++) {
+    mag[k] = Math.hypot(real[k]!, imag[k]!);
+  }
+
+  const startBin = Math.max(1, Math.floor(minFrequency / binRes));
+  const endBin = Math.min(half - 1, Math.ceil(maxFrequency / binRes));
+  const ampScale = winSum > 0 ? 2 / winSum : 2 / fftSize;
+
+  const peaks: DetectedSpectralPeak[] = [];
+
+  for (let k = startBin; k <= endBin; k++) {
+    const mPrev = mag[k - 1]!;
+    const mCurr = mag[k]!;
+    const mNext = mag[k + 1]!;
+
+    if (mCurr > mPrev && mCurr >= mNext && mCurr * ampScale >= minAmplitude) {
+      // Parabolic interpolation on log-magnitude spectrum (quadratic interpolation)
+      const eps = 1e-20;
+      const alpha = Math.log(mPrev + eps);
+      const beta = Math.log(mCurr + eps);
+      const gamma = Math.log(mNext + eps);
+      const denom = alpha - 2 * beta + gamma;
+      let delta = 0;
+      if (Math.abs(denom) > 1e-12) {
+        delta = (0.5 * (alpha - gamma)) / denom;
+        delta = Math.max(-0.5, Math.min(0.5, delta));
+      }
+
+      const peakBin = k + delta;
+      const peakFreq = peakBin * binRes;
+      if (peakFreq < minFrequency || peakFreq > maxFrequency) continue;
+
+      const interpLogMag = beta - 0.25 * (alpha - gamma) * delta;
+      const interpMag = Math.exp(interpLogMag);
+      const amplitude = interpMag * ampScale;
+
+      if (amplitude < minAmplitude) continue;
+
+      // Interpolate unwrapped cosine phase across [k, k + sign(delta)]
+      const p0 = Math.atan2(imag[k]!, real[k]!);
+      let cosPhase = p0;
+      if (Math.abs(delta) > 1e-6) {
+        const neighborIdx = delta > 0 ? k + 1 : k - 1;
+        const p1 = Math.atan2(imag[neighborIdx]!, real[neighborIdx]!);
+        const diff = wrapPhase(p1 - p0);
+        cosPhase = wrapPhase(p0 + Math.abs(delta) * diff);
+      }
+
+      // Convert cosine phase to sine phase: cos(theta) = sin(theta + pi/2)
+      const sinePhase = wrapPhase(cosPhase + HALF_PI);
+
+      peaks.push({
+        bin: peakBin,
+        frequency: peakFreq,
+        amplitude,
+        phase: sinePhase,
+      });
+    }
+  }
+
+  // Also check exact Nyquist bin if within maxFrequency
+  if (maxFrequency >= sampleRate / 2 - 1e-6) {
+    const nyqAmp = mag[half]! / (winSum > 0 ? winSum : fftSize);
+    if (nyqAmp >= minAmplitude && nyqAmp > mag[half - 1]! * ampScale) {
+      peaks.push({
+        bin: half,
+        frequency: sampleRate / 2,
+        amplitude: nyqAmp,
+        phase: real[half]! >= 0 ? HALF_PI : -HALF_PI,
+      });
+    }
+  }
+
+  peaks.sort((a, b) => b.amplitude - a.amplitude);
+  return peaks.slice(0, maxPeaks);
+}
+
+/**
+ * Pure, Web-Worker-compatible comprehensive DSP audio analyzer operating on raw PCM channels.
+ */
+export function analyzeAudioSamples(
+  channels: Float32Array[],
+  sampleRate: number
+): AudioAnalysisResult {
+  const channelCount = Math.max(1, channels.length);
+  const samples = channelsToMono(channels);
+  const totalSamples = samples.length;
+  const duration = sampleRate > 0 ? totalSamples / sampleRate : 0;
+
+  // 1. Peak, RMS, DC offset, Crest factor
   let maxAbs = 0;
   let sumSquares = 0;
+  let sumVal = 0;
   for (let i = 0; i < totalSamples; i++) {
     const val = samples[i]!;
     const abs = Math.abs(val);
     if (abs > maxAbs) maxAbs = abs;
     sumSquares += val * val;
+    sumVal += val;
   }
+
   const peakAmplitude = maxAbs;
   const rmsLoudness = totalSamples > 0 ? Math.sqrt(sumSquares / totalSamples) : 0;
+  const dcOffset = totalSamples > 0 ? sumVal / totalSamples : 0;
+  const crestFactor = rmsLoudness > 1e-12 ? peakAmplitude / rmsLoudness : 0;
+  const isSilent = peakAmplitude < SILENCE_PEAK_THRESHOLD;
+
+  if (isSilent || totalSamples === 0) {
+    return {
+      duration,
+      sampleRate,
+      channelCount,
+      sampleLength: totalSamples,
+      isSilent: true,
+      dcOffset: 0,
+      peakAmplitude,
+      rmsLoudness,
+      crestFactor: 0,
+      zeroCrossingRate: 0,
+      averageSpectralCentroid: 0,
+      tonalVsNoisyScore: 0,
+      attackDuration: 0,
+      decayDuration: 0,
+      startFrequencyEstimate: 0,
+      endFrequencyEstimate: 0,
+      topSpectralPeaks: [],
+      classification: 'silent',
+      envelope: [
+        { time: 0, amplitude: 0 },
+        { time: duration, amplitude: 0 },
+      ],
+      dominantFrequencies: [],
+      explanations: {
+        classificationRationale: 'Signal amplitude is below the silence floor (-120 dBFS).',
+        tonalRatioExplanation: 'No measurable tonal or noise energy detected.',
+        centroidExplanation: 'Spectral centroid is 0 Hz for silent signals.',
+        limitations: 'Silence reconstructs trivially as S(t) = 0.',
+      },
+    };
+  }
 
   // 2. Zero Crossing Rate
   const zeroCrossingRate = calculateZeroCrossingRate(samples);
 
-  // 3. Frame-based FFT analysis (20ms frames, 50% overlap)
-  const fftSize = 1024;
-  const hopSize = 512;
-  const fft = new LightweightFFT(fftSize);
-  const binResolution = sampleRate / 2 / (fftSize / 2);
+  // 3. Adaptive STFT analysis that works even for very short clicks/impulses (< 1024 samples)
+  const windowSize = Math.min(1024, Math.max(64, nextPowerOf2(Math.min(totalSamples, 1024))));
+  const fftSize = Math.max(2048, nextPowerOf2(windowSize * 2));
+  const hopSize = Math.max(32, Math.min(256, windowSize >> 2));
+  const fft = getCachedFFT(fftSize);
+  const hannWin = createWindow(windowSize, 'hann');
 
   const envelopePoints: EnvelopePoint[] = [];
   const dominantFreqPoints: FrequencyPoint[] = [];
 
-  let sumCentroid = 0;
-  let sumFlatness = 0;
-  let frameCount = 0;
+  let weightedCentroidSum = 0;
+  let weightedFlatnessSum = 0;
+  let energyWeightSum = 0;
 
-  for (let offset = 0; offset + fftSize <= totalSamples; offset += hopSize) {
-    const frameTime = offset / sampleRate;
+  // Center-sampled frames from 0 to totalSamples - 1
+  const numFrames = Math.max(1, Math.ceil(totalSamples / hopSize));
 
-    // RMS of this frame for envelope
+  for (let m = 0; m < numFrames; m++) {
+    const center = Math.min(totalSamples - 1, m * hopSize);
+    const frameTime = center / sampleRate;
+
+    // Fine-resolution RMS around center
+    const rmsHalf = Math.max(16, hopSize >> 1);
+    const rmsStart = Math.max(0, center - rmsHalf);
+    const rmsEnd = Math.min(totalSamples, center + rmsHalf);
     let frameSumSq = 0;
-    for (let j = 0; j < hopSize; j++) {
-      const s = samples[offset + j]!;
+    for (let j = rmsStart; j < rmsEnd; j++) {
+      const s = samples[j]!;
       frameSumSq += s * s;
     }
-    const frameRms = Math.sqrt(frameSumSq / hopSize);
-    envelopePoints.push({
-      time: frameTime,
-      amplitude: frameRms,
-    });
+    const frameRms = rmsEnd > rmsStart ? Math.sqrt(frameSumSq / (rmsEnd - rmsStart)) : 0;
+    envelopePoints.push({ time: frameTime, amplitude: frameRms });
 
-    // FFT Spectrum
-    const spectrum = fft.computeMagnitudeSpectrum(samples, offset);
-    const centroid = calculateSpectralCentroid(spectrum, sampleRate);
-    const flatness = calculateSpectralFlatness(spectrum);
+    // Energy-weighted spectrum features (ignores trailing silence frames!)
+    if (frameRms > peakAmplitude * 1e-3) {
+      const offset = center - (windowSize >> 1);
+      const spectrum = fft.computeNormalizedMagnitudeSpectrum(samples, offset, hannWin);
+      const centroid = calculateSpectralCentroid(spectrum, sampleRate);
+      const flatness = calculateSpectralFlatness(spectrum);
+      const weight = frameRms * frameRms;
+      weightedCentroidSum += centroid * weight;
+      weightedFlatnessSum += flatness * weight;
+      energyWeightSum += weight;
 
-    sumCentroid += centroid;
-    sumFlatness += flatness;
-    frameCount++;
+      // Sub-bin dominant peak
+      const peaks = extractZeroPhaseSpectralPeaks(
+        samples,
+        center,
+        sampleRate,
+        fftSize,
+        windowSize,
+        {
+          minFrequency: 20,
+          maxFrequency: Math.min(18000, sampleRate / 2),
+          minAmplitude: peakAmplitude * 0.02,
+          maxPeaks: 1,
+          windowType: 'hann',
+        }
+      );
 
-    // Find dominant peak (ignore very low rumble < 40 Hz)
-    let maxMag = 0;
-    let peakBin = 0;
-    const startBin = Math.max(1, Math.floor(40 / binResolution));
-    const endBin = Math.min(spectrum.length - 1, Math.floor(12000 / binResolution));
-
-    for (let b = startBin; b <= endBin; b++) {
-      const mag = spectrum[b]!;
-      if (mag > maxMag) {
-        maxMag = mag;
-        peakBin = b;
+      if (peaks.length > 0) {
+        const p = peaks[0]!;
+        dominantFreqPoints.push({
+          time: frameTime,
+          frequency: p.frequency,
+          magnitude: p.amplitude,
+          phase: p.phase,
+        });
       }
     }
-
-    if (maxMag > 0.01) {
-      dominantFreqPoints.push({
-        time: frameTime,
-        frequency: peakBin * binResolution,
-        magnitude: maxMag,
-      });
-    }
   }
 
-  const avgCentroid = frameCount > 0 ? sumCentroid / frameCount : 1000;
-  const avgFlatness = frameCount > 0 ? sumFlatness / frameCount : 0.5;
+  const avgCentroid = energyWeightSum > 0 ? weightedCentroidSum / energyWeightSum : 0;
+  const avgFlatness = energyWeightSum > 0 ? weightedFlatnessSum / energyWeightSum : 0.5;
 
-  // Tonal vs noisy score: Inverted spectral flatness combined with ZCR factor
-  // 1.0 = highly tonal (pure sine/triangle), 0.0 = white/colored noise
+  // Tonal vs noisy score based primarily on spectral flatness (Wiener entropy)
   const tonalVsNoisyScore = Math.max(
     0.0,
-    Math.min(1.0, (1 - avgFlatness) * 0.7 + (1 - Math.min(1, zeroCrossingRate * 3)) * 0.3)
+    Math.min(1.0, (1 - Math.pow(avgFlatness, 0.5)) * 0.8 + (1 - Math.min(1, zeroCrossingRate * 2.5)) * 0.2)
   );
 
-  // 4. Attack & Decay Timing
-  let maxEnvelope = 0;
-  let peakTime = 0;
-  for (const pt of envelopePoints) {
-    if (pt.amplitude > maxEnvelope) {
-      maxEnvelope = pt.amplitude;
-      peakTime = pt.time;
+  // 4. High-resolution Attack & Decay timing (1ms resolution via fine envelope)
+  let maxEnvVal = 0;
+  let peakEnvIdx = 0;
+  for (let i = 0; i < totalSamples; i++) {
+    const a = Math.abs(samples[i]!);
+    if (a > maxEnvVal) {
+      maxEnvVal = a;
+      peakEnvIdx = i;
+    }
+  }
+  // Find onset (first sample > 5% of peak)
+  let onsetIdx = 0;
+  const onsetThresh = maxEnvVal * 0.05;
+  for (let i = 0; i < totalSamples; i++) {
+    if (Math.abs(samples[i]!) >= onsetThresh) {
+      onsetIdx = i;
+      break;
     }
   }
 
-  const attackDuration = Math.max(0.001, peakTime);
-  const thresholdDecay = maxEnvelope * 0.1; // -20 dB down
-  let decayEndTime = duration;
+  const attackDuration = Math.max(0.0005, (peakEnvIdx - onsetIdx) / sampleRate);
 
+  const peakTime = peakEnvIdx / sampleRate;
+  const thresholdDecay =
+    (envelopePoints.reduce((acc, p) => Math.max(acc, p.amplitude), 0) || rmsLoudness) * 0.1;
+  let decayEndTime = duration;
   for (const pt of envelopePoints) {
     if (pt.time > peakTime && pt.amplitude <= thresholdDecay) {
       decayEndTime = pt.time;
       break;
     }
   }
-  const decayDuration = Math.max(0.01, decayEndTime - peakTime);
+  const decayDuration = Math.max(0.005, decayEndTime - peakTime);
 
-  // 5. Frequency Trajectory (Sweep Start & End)
-  let startFreqEstimate = 440;
-  let endFreqEstimate = 440;
+  // 5. Global prominent spectral peaks (from center of max-energy region using large zero-phase FFT)
+  const globalWin = Math.min(4096, Math.max(64, totalSamples));
+  const globalFftSize = Math.max(4096, nextPowerOf2(globalWin * 2));
+  const globalCenter = Math.min(
+    totalSamples - 1,
+    Math.max(0, Math.round(totalSamples * 0.5))
+  );
+  // If transient/decaying, analyze around peak energy region instead of dead tail
+  const analysisCenter =
+    decayDuration < duration * 0.4 ? Math.min(totalSamples - 1, peakEnvIdx + Math.min(globalWin >> 2, (totalSamples - peakEnvIdx) >> 1)) : globalCenter;
 
-  if (dominantFreqPoints.length > 0) {
+  const globalPeaks = extractZeroPhaseSpectralPeaks(
+    samples,
+    analysisCenter,
+    sampleRate,
+    globalFftSize,
+    globalWin,
+    {
+      minFrequency: 15,
+      maxFrequency: sampleRate / 2,
+      minAmplitude: peakAmplitude * 0.01,
+      maxPeaks: 12,
+      windowType: 'hann',
+    }
+  );
+
+  const topSpectralPeaks: SpectralPeakSummary[] = globalPeaks.map((p) => ({
+    frequency: p.frequency,
+    amplitude: p.amplitude,
+    phase: p.phase,
+  }));
+
+  // 6. Frequency Trajectory (Sweep Start & End)
+  let startFreqEstimate = topSpectralPeaks[0]?.frequency ?? Math.min(4000, Math.max(80, avgCentroid));
+  let endFreqEstimate = startFreqEstimate;
+
+  if (dominantFreqPoints.length >= 2) {
     const sortedByTime = [...dominantFreqPoints].sort((a, b) => a.time - b.time);
-    const firstQuarter = sortedByTime.slice(0, Math.max(1, Math.floor(sortedByTime.length * 0.25)));
-    const lastQuarter = sortedByTime.slice(Math.floor(sortedByTime.length * 0.75));
+    const qLen = Math.max(1, Math.floor(sortedByTime.length * 0.2));
+    const firstSlice = sortedByTime.slice(0, qLen);
+    const lastSlice = sortedByTime.slice(sortedByTime.length - qLen);
 
-    if (firstQuarter.length > 0) {
-      const sumF = firstQuarter.reduce((acc, p) => acc + p.frequency, 0);
-      startFreqEstimate = sumF / firstQuarter.length;
-    }
-    if (lastQuarter.length > 0) {
-      const sumF = lastQuarter.reduce((acc, p) => acc + p.frequency, 0);
-      endFreqEstimate = sumF / lastQuarter.length;
-    } else {
-      endFreqEstimate = startFreqEstimate;
-    }
-  } else {
-    // If no distinct peak found, use centroid
-    startFreqEstimate = Math.min(4000, Math.max(100, avgCentroid * 0.5));
+    startFreqEstimate = firstSlice.reduce((s, p) => s + p.frequency, 0) / firstSlice.length;
+    endFreqEstimate = lastSlice.reduce((s, p) => s + p.frequency, 0) / lastSlice.length;
+  } else if (dominantFreqPoints.length === 1) {
+    startFreqEstimate = dominantFreqPoints[0]!.frequency;
     endFreqEstimate = startFreqEstimate;
   }
 
-  // 6. Classification Heuristic
+  // 7. Classification Heuristic
   let classification: SoundClassification = 'mixed';
   let rationale = '';
 
-  const isFastAttack = attackDuration < 0.025;
-  const isShortDecay = decayDuration < 0.25;
-  const isHighNoise = tonalVsNoisyScore < 0.35 || zeroCrossingRate > 0.16;
-  const isStrongTonal = tonalVsNoisyScore > 0.65 && zeroCrossingRate < 0.12;
+  const isImpulseOrClick = crestFactor > 7.5 && decayDuration < 0.12;
+  const isFastAttack = attackDuration < 0.02;
+  const isShortDecay = decayDuration < 0.22;
+  const isHighNoise = avgFlatness > 0.35 || tonalVsNoisyScore < 0.38;
+  const isStrongTonal = avgFlatness < 0.12 && tonalVsNoisyScore > 0.65;
 
-  if (isHighNoise && !isFastAttack) {
-    classification = 'noisy';
-    rationale =
-      'Dominated by high spectral flatness and zero-crossing rate with dispersed frequencies.';
-  } else if (isFastAttack && isShortDecay) {
+  if (isImpulseOrClick || (isFastAttack && isShortDecay && !isStrongTonal)) {
     classification = 'percussive';
-    rationale = `Fast onset attack (${(attackDuration * 1000).toFixed(1)}ms) and rapid exponential decay (${(decayDuration * 1000).toFixed(1)}ms).`;
+    rationale = `Sharp transient onset (${(attackDuration * 1000).toFixed(1)}ms attack, crest ${crestFactor.toFixed(1)}, ${(decayDuration * 1000).toFixed(0)}ms decay).`;
+  } else if (isHighNoise) {
+    classification = 'noisy';
+    rationale = `Broadband / noisy spectrum (spectral flatness ${(avgFlatness * 100).toFixed(0)}%, ZCR ${(zeroCrossingRate * 100).toFixed(1)}%).`;
   } else if (isStrongTonal) {
     classification = 'tonal';
-    rationale = `Prominent fundamental harmonic peaks detected (tonal score: ${(tonalVsNoisyScore * 100).toFixed(0)}%).`;
+    rationale = `Strong harmonic peaks centered near ${Math.round(startFreqEstimate)} Hz (flatness ${(avgFlatness * 100).toFixed(1)}%).`;
   } else {
     classification = 'mixed';
-    rationale =
-      'Contains identifiable harmonic center layered with transient attack noise or background noise.';
+    rationale = `Combination of harmonic structure (~${Math.round(startFreqEstimate)} Hz) and transient/broadband energy.`;
   }
 
   return {
     duration,
     sampleRate,
     channelCount,
+    sampleLength: totalSamples,
+    isSilent: false,
+    dcOffset,
     peakAmplitude,
     rmsLoudness,
+    crestFactor,
     zeroCrossingRate,
     averageSpectralCentroid: avgCentroid,
     tonalVsNoisyScore,
@@ -275,17 +544,32 @@ export function analyzeAudioBuffer(
     decayDuration,
     startFrequencyEstimate: startFreqEstimate,
     endFrequencyEstimate: endFreqEstimate,
+    topSpectralPeaks,
     classification,
     envelope: envelopePoints,
     dominantFrequencies: dominantFreqPoints,
     explanations: {
       classificationRationale: rationale,
       tonalRatioExplanation:
-        'Calculated from spectral flatness and zero-crossing rate. A score near 100% indicates clear musical tones, while near 0% indicates wideband noise.',
+        'Derived from Wiener spectral flatness (geometric/arithmetic power ratio) and zero-crossing rate. Near 100% indicates discrete sinusoids; near 0% indicates wideband noise.',
       centroidExplanation:
-        'Spectral centroid measures the brightness center of the sound in Hertz. Higher values indicate crisper, brighter sounds.',
+        'Spectral centroid is the amplitude-weighted frequency center of mass in Hertz.',
       limitations:
-        'Browser-based single-pass STFT analysis is optimized for short game sound effects (< 3s). It does not separate speech, polyphonic music, or multi-timbral instruments.',
+        'Broadband noise, explosions, and sharp impulses require many Fourier sinusoids for exact fidelity; compact procedural equations approximate their envelope and spectral contour.',
     },
   };
+}
+
+/**
+ * Convenience wrapper analyzing a Web Audio API AudioBuffer.
+ */
+export function analyzeAudioBuffer(
+  audioBuffer: AudioBuffer,
+  channelCount = audioBuffer.numberOfChannels
+): AudioAnalysisResult {
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < Math.min(channelCount, audioBuffer.numberOfChannels); c++) {
+    channels.push(audioBuffer.getChannelData(c));
+  }
+  return analyzeAudioSamples(channels, audioBuffer.sampleRate);
 }

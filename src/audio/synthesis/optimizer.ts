@@ -19,16 +19,13 @@ export interface OptimizationResult {
   cancelled: boolean;
 }
 
-/**
- * Clones a SoundRecipe deeply.
- */
 export function cloneRecipe(recipe: SoundRecipe): SoundRecipe {
   return JSON.parse(JSON.stringify(recipe)) as SoundRecipe;
 }
 
 /**
- * Optimizes a SoundRecipe by iteratively testing controlled perturbations
- * against the original audio analysis features.
+ * Optimizes a manual SoundRecipe via bi-directional coordinate perturbation.
+ * Fixes prior bug where odd perturbation modes could only ever step in one direction.
  */
 export async function optimizeRecipe(
   initialRecipe: SoundRecipe,
@@ -39,16 +36,13 @@ export async function optimizeRecipe(
 
   let bestRecipe = cloneRecipe(initialRecipe);
 
-  // Evaluate initial recipe
-  const initialBuffer = await renderRecipeToBuffer(bestRecipe, 22050); // 22kHz for ultra-fast convergence
+  const initialBuffer = await renderRecipeToBuffer(bestRecipe, 22050, 0);
   const initialProcAnalysis = analyzeAudioBuffer(initialBuffer);
   let bestMetrics = calculateApproximationScore(originalAnalysis, initialProcAnalysis);
   let bestScore = bestMetrics.approximationScore;
   const initialScore = bestScore;
 
-  if (onProgress) {
-    onProgress(0, bestScore, bestRecipe);
-  }
+  onProgress?.(0, bestScore, bestRecipe);
 
   let iterationsCompleted = 0;
   let cancelled = false;
@@ -59,7 +53,6 @@ export async function optimizeRecipe(
       break;
     }
 
-    // Clone and perturb one parameter
     const candidate = cloneRecipe(bestRecipe);
     if (candidate.layers.length > 0) {
       const layerIdx = i % candidate.layers.length;
@@ -68,7 +61,7 @@ export async function optimizeRecipe(
     }
 
     try {
-      const candidateBuffer = await renderRecipeToBuffer(candidate, 22050);
+      const candidateBuffer = await renderRecipeToBuffer(candidate, 22050, 0);
       const procAnalysis = analyzeAudioBuffer(candidateBuffer);
       const metrics = calculateApproximationScore(originalAnalysis, procAnalysis);
 
@@ -78,26 +71,19 @@ export async function optimizeRecipe(
         bestRecipe = candidate;
       }
     } catch {
-      // If rendering fails on a candidate, ignore perturbation
+      // Ignore invalid perturbation
     }
 
     iterationsCompleted++;
-    const progress = (i + 1) / maxIterations;
-
-    if (onProgress) {
-      onProgress(progress, bestScore, bestRecipe);
-    }
-
-    // Yield control to event loop so UI stays responsive
+    onProgress?.((i + 1) / maxIterations, bestScore, bestRecipe);
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  // Update recipe metadata with the approximation score
   bestRecipe.metadata = {
     ...bestRecipe.metadata,
     approximationScore: bestScore,
     createdAt: new Date().toISOString(),
-    generator: 'Resonance SFX Heuristic + Optimizer',
+    generator: 'Resonance SFX Coordinate Optimizer',
   };
 
   return {
@@ -110,57 +96,47 @@ export async function optimizeRecipe(
   };
 }
 
-/**
- * Perturbs a layer parameter slightly according to iteration step.
- */
 function perturbLayer(layer: SoundLayer, step: number, target: AudioAnalysisResult): void {
   const mode = step % 6;
+  // Cycle sign across full passes of all 6 modes so every mode tests BOTH + and - directions!
+  const passParity = Math.floor(step / 6) % 2 === 0 ? 1 : -1;
+
   switch (mode) {
     case 0: {
-      // Nudge frequencies closer to target estimates
-      const targetStart = target.startFrequencyEstimate;
-      const targetEnd = target.endFrequencyEstimate;
-      layer.startFrequency = Math.round(layer.startFrequency * 0.9 + targetStart * 0.1);
-      layer.endFrequency = Math.round(layer.endFrequency * 0.9 + targetEnd * 0.1);
+      const targetStart = Math.max(20, target.startFrequencyEstimate);
+      const targetEnd = Math.max(20, target.endFrequencyEstimate);
+      layer.startFrequency = Math.round(layer.startFrequency * 0.85 + targetStart * 0.15);
+      layer.endFrequency = Math.round(layer.endFrequency * 0.85 + targetEnd * 0.15);
       break;
     }
     case 1: {
-      // Nudge attack / decay
-      const factor = step % 2 === 0 ? 1.15 : 0.85;
+      const factor = passParity > 0 ? 1.15 : 0.85;
       layer.envelope.decay = Math.max(0.005, Math.min(2.0, layer.envelope.decay * factor));
       break;
     }
     case 2: {
-      // Nudge filter cutoff towards target spectral centroid
       if (layer.lowPassFilter.enabled) {
-        const centroid = target.averageSpectralCentroid;
+        const centroid = Math.max(100, target.averageSpectralCentroid);
         layer.lowPassFilter.cutoff = Math.round(layer.lowPassFilter.cutoff * 0.8 + centroid * 0.2);
         layer.lowPassFilter.cutoff = Math.max(100, Math.min(18000, layer.lowPassFilter.cutoff));
       }
       break;
     }
     case 3: {
-      // Nudge layer gain
-      const gainDelta = step % 2 === 0 ? 0.05 : -0.05;
-      layer.gain = Math.max(0.1, Math.min(1.0, layer.gain + gainDelta));
+      layer.gain = Math.max(0.1, Math.min(1.0, layer.gain + passParity * 0.06));
       break;
     }
     case 4: {
-      // Nudge resonance Q
       if (layer.lowPassFilter.enabled) {
-        layer.lowPassFilter.q = Math.max(
-          0.5,
-          Math.min(6.0, layer.lowPassFilter.q + (step % 2 === 0 ? 0.3 : -0.3))
-        );
+        layer.lowPassFilter.q = Math.max(0.5, Math.min(6.0, layer.lowPassFilter.q + passParity * 0.35));
       }
       break;
     }
     case 5: {
-      // Nudge distortion
       if (layer.distortion.enabled) {
         layer.distortion.amount = Math.max(
           0,
-          Math.min(0.8, layer.distortion.amount + (step % 2 === 0 ? 0.05 : -0.05))
+          Math.min(0.8, layer.distortion.amount + passParity * 0.05)
         );
       }
       break;

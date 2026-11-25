@@ -3,23 +3,22 @@ import { buildRecipeGraph } from '../synthesis/graph';
 
 /**
  * Renders a SoundRecipe into an AudioBuffer using OfflineAudioContext.
- * Guarantees bit-for-bit identical results between preview and WAV export.
+ * Allows specifying tailTime (default 0.0 for exact duration alignment, or > 0 for delay tails).
  */
 export async function renderRecipeToBuffer(
   recipe: SoundRecipe,
-  sampleRate = 44100
+  sampleRate = 44100,
+  tailTime = 0
 ): Promise<AudioBuffer> {
-  const tailTime = 0.15; // Allow envelope release and delay tails to settle smoothly
-  const totalDuration = Math.max(0.1, Math.min(6.0, recipe.duration + tailTime));
-  const frameCount = Math.ceil(totalDuration * sampleRate);
+  const hasDelay = recipe.layers.some((l) => l.enabled && l.delay.enabled && l.delay.mix > 0.01);
+  const effectiveTail = tailTime > 0 ? tailTime : hasDelay ? 0.08 : 0;
+  const totalDuration = Math.max(0.02, Math.min(15.0, recipe.duration + effectiveTail));
+  const frameCount = Math.max(1, Math.round(totalDuration * sampleRate));
 
-  // 2 channels for stereo support (panning)
   const offlineCtx = new OfflineAudioContext(2, frameCount, sampleRate);
-
   buildRecipeGraph(offlineCtx, recipe, offlineCtx.destination, 0);
 
-  const renderedBuffer = await offlineCtx.startRendering();
-  return renderedBuffer;
+  return offlineCtx.startRendering();
 }
 
 /**
